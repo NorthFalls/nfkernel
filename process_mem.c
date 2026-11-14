@@ -340,7 +340,6 @@ static void cleanup_patch(struct work_struct *work)
     mm = live_mm(session);
     if (IS_ERR(mm)) {
         session->cleanup_failed = true;
-        pr_err("sensor session cleanup lost target (%ld)\n", PTR_ERR(mm));
         return;
     }
     /* Unpublish first: while the GOT still points at the trampoline, zeroing
@@ -356,7 +355,6 @@ static void cleanup_patch(struct work_struct *work)
     }
     if (delta_ret != sizeof(u64) || got_ret != sizeof(u64)) {
         session->cleanup_failed = true;
-        pr_err("sensor session cleanup failed delta=%zd got=%zd\n", delta_ret, got_ret);
     }
     mmput(mm);
 }
