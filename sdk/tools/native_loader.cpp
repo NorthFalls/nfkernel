@@ -135,12 +135,10 @@ static void banner() {
     std::printf("%s<<<Welcome to NFKernel %s Driver!>>>%s\n\n", kYellow,
                 kVersion, kReset);
     std::printf("%s", kMagenta);
-    std::puts("    _   _            _   _    ______    _ _ ");
-    std::puts("   | \\ | |          | | | |   |  ___|  | | |");
-    std::puts("   |  \\| | ___  _ __| |_| |__ | |_ __ _| | |");
-    std::puts("   | . ` |/ _ \\| '__| __| '_ \\|  _/ _` | | |");
-    std::puts("   | |\\  | (_) | |  | |_| | | | || (_| | | |");
-    std::puts("   \\_| \\_/\\___/|_|   \\__|_| |_\\_| \\__,_|_|_|");
+    std::puts("      _  __         __  __   ____     ____");
+    std::puts("     / |/ /__  ____/ /_/ /  / __/__ _/ / /");
+    std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
+    std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
     std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
