@@ -143,13 +143,13 @@ int dfm_compat_init(void)
 		addr = dfm_kallsyms_lookup_name(sym->name);
 		*sym->slot = (void *)addr;
 		if (!addr) {
-			pr_err("nf: missing symbol: %s\n", sym->name);
+			pr_err("missing symbol: %s\n", sym->name);
 			dfm_compat_missing++;
 		}
 	}
 
 	if (dfm_compat_missing)
-		pr_err("nf: %u compat symbol(s) missing; loading degraded\n",
+		pr_err("%u compat symbol(s) missing; loading degraded\n",
 		       dfm_compat_missing);
 
 	/* Optional symbol: missing on some vendor kernels, fall back to
