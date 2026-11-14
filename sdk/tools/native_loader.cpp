@@ -1372,10 +1372,9 @@ static int run_menu(const std::string& /*release*/, int detected,
 
         std::printf("\n%s[-] 请选择%s内核的子方案：%s\n", kMagenta,
                     group.series, kReset);
-        for (size_t j = 0; j < group.count; ++j) {
-            const char* label = j == 0 ? "通用方案" : "Pixel专用方案";
-            std::printf("%s[%zu] %s%s\n", kMagenta, j + 1, label, kReset);
-        }
+        for (size_t j = 0; j < group.count; ++j)
+            std::printf("%s[%zu] 安卓%d方案%s\n", kMagenta, j + 1,
+                        kKmiTargets[group.first + j].android, kReset);
         long sub = 0;
         if (!read_choice(&sub)) {
             err("输入已结束，程序退出");
