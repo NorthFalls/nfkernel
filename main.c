@@ -36,8 +36,8 @@
 #include "dfm_module.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("dfm");
-MODULE_DESCRIPTION("dfm");
+MODULE_AUTHOR("DFM");
+MODULE_DESCRIPTION("DFM lab debug module");
 MODULE_VERSION(DFM_MODULE_VERSION);
 
 /* ---- ioctl dispatcher ---- */
