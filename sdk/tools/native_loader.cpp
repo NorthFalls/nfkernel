@@ -140,7 +140,7 @@ static void banner() {
     std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
     std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
-    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
+    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载器>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
                 kYellow, kReset);
     std::printf("%s    %s%s\n", kTeal, kTgUrl, kReset);
