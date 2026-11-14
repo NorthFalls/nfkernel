@@ -102,10 +102,10 @@ static_assert(kKmiTargetCount == 8, "exactly eight KMI targets are supported");
 
 static const char* const kReset = "\033[0m";
 static const char* const kCyan = "\033[1;36m";
-static const char* const kGreen = "\033[38;2;0;255;128m";
-static const char* const kYellow = "\033[38;2;255;215;0m";
+static const char* const kGreen = "\033[1;32m";
+static const char* const kYellow = "\033[1;33m";
 static const char* const kRed = "\033[1;31m";
-static const char* const kMagenta = "\033[38;2;255;20;147m";
+static const char* const kMagenta = "\033[1;35m";
 static const char* const kTeal = "\033[38;2;110;195;198m";
 static const char* const kWarnRed = "\033[38;2;210;120;112m";
 
@@ -135,10 +135,12 @@ static void banner() {
     std::printf("%s<<<Welcome to NFKernel %s Driver!>>>%s\n\n", kYellow,
                 kVersion, kReset);
     std::printf("%s", kMagenta);
-    std::puts("    _  _         _   _    ___     _ _ ");
-    std::puts("   | \\| |___ _ _| |_| |_ | __|_ _| | |");
-    std::puts("   | .` / _ \\ '_|  _| ' \\| _/ _` | | |");
-    std::puts("   |_|\\_\\___/_|  \\__|_||_|_|\\__,_|_|_|");
+    std::puts("    _   _            _   _    ______    _ _ ");
+    std::puts("   | \\ | |          | | | |   |  ___|  | | |");
+    std::puts("   |  \\| | ___  _ __| |_| |__ | |_ __ _| | |");
+    std::puts("   | . ` |/ _ \\| '__| __| '_ \\|  _/ _` | | |");
+    std::puts("   | |\\  | (_) | |  | |_| | | | || (_| | | |");
+    std::puts("   \\_| \\_/\\___/|_|   \\__|_| |_\\_| \\__,_|_|_|");
     std::printf("%s", kReset);
     std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
