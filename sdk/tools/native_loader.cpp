@@ -135,11 +135,12 @@ static void banner() {
     std::printf("%s<<<Welcome to NFKernel %s Driver!>>>%s\n\n", kYellow,
                 kVersion, kReset);
     std::printf("%s", kMagenta);
-    std::puts(" _   _            _   _     _____     _ _ ");
-    std::puts("| \\ | | ___  _ __| |_| |__ |  ___|_ _| | |");
-    std::puts("|  \\| |/ _ \\| '__| __| '_ \\| |_ / _` | | |");
-    std::puts("| |\\  | (_) | |  | |_| | | |  _| (_| | | |");
-    std::puts("|_| \\_|\\___/|_|   \\__|_| |_|_|  \\__,_|_|_|");
+    std::puts("   ███╗   ██╗ ██████╗ ██████╗ ████████╗██╗  ██╗███████╗ █████╗ ██╗     ██╗     ");
+    std::puts("   ████╗  ██║██╔═══██╗██╔══██╗╚══██╔══╝██║  ██║██╔════╝██╔══██╗██║     ██║     ");
+    std::puts("   ██╔██╗ ██║██║   ██║██████╔╝   ██║   ███████║█████╗  ███████║██║     ██║     ");
+    std::puts("   ██║╚██╗██║██║   ██║██╔══██╗   ██║   ██╔══██║██╔══╝  ██╔══██║██║     ██║     ");
+    std::puts("   ██║ ╚████║╚██████╔╝██║  ██║   ██║   ██║  ██║██║     ██║  ██║███████╗███████╗");
+    std::puts("   ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝");
     std::printf("%s", kReset);
     std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
@@ -1337,16 +1338,10 @@ static size_t build_groups(SeriesGroup* groups, size_t capacity) {
 
 static void show_menu(const SeriesGroup* groups, size_t group_count,
                       int detected) {
+    (void)detected;
     for (size_t i = 0; i < group_count; ++i) {
-        bool current = false;
-        for (size_t j = 0; j < groups[i].count; ++j) {
-            const size_t index = groups[i].first + j;
-            if (int(index) == detected)
-                current = true;
-        }
-        std::printf("%s[%zu] %s 内核（%zu 个子方案）%s%s\n", kMagenta,
-                    i + 1, groups[i].series, groups[i].count,
-                    current ? "  <- 当前内核" : "", kReset);
+        std::printf("%s[%zu] 内核版本：%s（%zu 个子方案）%s\n", kMagenta,
+                    i + 1, groups[i].series, groups[i].count, kReset);
     }
     std::printf("%s[%zu] 退出程序%s\n", kMagenta, group_count + 1, kReset);
 }
@@ -1357,7 +1352,7 @@ static int run_menu(const std::string& /*release*/, int detected,
     SeriesGroup groups[16];
     const size_t group_count = build_groups(groups, 16);
     for (;;) {
-        std::printf("\n%s请根据当前内核版本，选择内核系列：%s\n\n",
+        std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n\n",
                     kYellow, kReset);
         show_menu(groups, group_count, detected);
         long choice = 0;
