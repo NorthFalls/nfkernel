@@ -1340,8 +1340,10 @@ static void show_menu(const SeriesGroup* groups, size_t group_count,
                       int detected) {
     (void)detected;
     for (size_t i = 0; i < group_count; ++i) {
-        std::printf("%s[%zu] 内核版本：%s（%zu 个子方案）%s\n", kMagenta,
-                    i + 1, groups[i].series, groups[i].count, kReset);
+        const char* count_text =
+            groups[i].count == 1 ? "一" : groups[i].count == 2 ? "二" : "多";
+        std::printf("%s[%zu] 内核版本：%-6s        （%s个子方案）%s\n",
+                    kMagenta, i + 1, groups[i].series, count_text, kReset);
     }
     std::printf("%s[%zu] 退出程序%s\n", kMagenta, group_count + 1, kReset);
 }
@@ -1352,8 +1354,6 @@ static int run_menu(const std::string& /*release*/, int detected,
     SeriesGroup groups[16];
     const size_t group_count = build_groups(groups, 16);
     for (;;) {
-        std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n\n",
-                    kYellow, kReset);
         show_menu(groups, group_count, detected);
         long choice = 0;
         if (!read_choice(&choice)) {
@@ -1372,9 +1372,10 @@ static int run_menu(const std::string& /*release*/, int detected,
 
         std::printf("\n%s[-] 请选择%s内核的子方案：%s\n", kMagenta,
                     group.series, kReset);
-        for (size_t j = 0; j < group.count; ++j)
-            std::printf("%s[%zu] 安卓%d方案%s\n", kMagenta, j + 1,
-                        kKmiTargets[group.first + j].android, kReset);
+        for (size_t j = 0; j < group.count; ++j) {
+            const char* label = j == 0 ? "通用方案" : "Pixel专用方案";
+            std::printf("%s[%zu] %s%s\n", kMagenta, j + 1, label, kReset);
+        }
         long sub = 0;
         if (!read_choice(&sub)) {
             err("输入已结束，程序退出");
