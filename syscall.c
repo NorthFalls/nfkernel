@@ -1,4 +1,4 @@
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#define pr_fmt(fmt) fmt
 
 #ifndef __aarch64__
 #error "NF kernel module requires ARM64"
