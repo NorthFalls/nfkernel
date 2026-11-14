@@ -1352,6 +1352,8 @@ static int run_menu(const std::string& /*release*/, int detected,
     SeriesGroup groups[16];
     const size_t group_count = build_groups(groups, 16);
     for (;;) {
+        std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n\n",
+                    kYellow, kReset);
         show_menu(groups, group_count, detected);
         long choice = 0;
         if (!read_choice(&choice)) {
