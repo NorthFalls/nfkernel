@@ -140,7 +140,7 @@ static void banner() {
     std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
     std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
-    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载器>>>%s\n\n", kYellow, kReset);
+    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
                 kYellow, kReset);
     std::printf("%s    %s%s\n", kTeal, kTgUrl, kReset);
@@ -945,6 +945,22 @@ static int detect_kmi_index(std::string* release) {
     return -1;
 }
 
+/* A module may only be flashed when its kernel series matches the running
+ * kernel. Android sub-schemes share the same series, so both 5.10 entries are
+ * accepted on a 5.10 kernel. */
+static bool kmi_version_matches_current(const char* kmi) {
+    std::string release;
+    const int current = detect_kmi_index(&release);
+    if (current < 0)
+        return true;
+    for (size_t i = 0; i < kKmiTargetCount; ++i) {
+        if (std::strcmp(kKmiTargets[i].kmi, kmi) == 0)
+            return std::strcmp(kKmiTargets[i].series,
+                               kKmiTargets[size_t(current)].series) == 0;
+    }
+    return true;
+}
+
 static void print_supported() {
     std::printf("%ssupported KMI:%s", kYellow, kReset);
     for (size_t i = 0; i < kKmiTargetCount; ++i)
@@ -1206,6 +1222,10 @@ static int load_kmi(const char* kmi, const std::string& params,
     if (!entry) {
         err("内置驱动中没有该内核版本");
         print_supported();
+        return kExitFailure;
+    }
+    if (!kmi_version_matches_current(kmi)) {
+        err("当前内核与所选驱动版本不匹配");
         return kExitFailure;
     }
     if (!is_module_loaded() && legacy_module_loaded()) {
