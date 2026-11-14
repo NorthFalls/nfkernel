@@ -352,7 +352,7 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
         kfree(tw);
         /* Log before dropping the pin: module text/rodata must not be touched
          * after module_put() may have released the last reference. */
-        pr_err("nf: task_work_add failed\n");
+        pr_err("task_work_add failed\n");
         module_put(THIS_MODULE);
     }
 
@@ -385,11 +385,8 @@ static int __init mod_init(void)
 		pr_err("compat init failed: %d\n", ret);
 		return ret;
 	}
-	if (dfm_compat_missing) {
-		pr_err("nf: degraded load, %u symbols missing\n",
-		       dfm_compat_missing);
+	if (dfm_compat_missing)
 		return 0;
-	}
 
 	dfm_info("compat ready, stage=%d\n", dfm_stage);
 	if (dfm_stage == DFM_STAGE_COMPAT)
@@ -417,7 +414,7 @@ static int __init mod_init(void)
 		syscall_ret = syscall_hook_init();
 		if (syscall_ret < 0) {
 			/* No fd-install entry without this hook: fail closed. */
-			pr_err("nf: syscall install hook unavailable: %d\n",
+			pr_err("syscall install hook unavailable: %d\n",
 			       syscall_ret);
 			ret = syscall_ret;
 			goto err_file;
@@ -428,7 +425,7 @@ static int __init mod_init(void)
 	if (dfm_stage == DFM_STAGE_REBOOT) {
 		reboot_ret = register_kprobe(&kp_reboot);
 		if (reboot_ret < 0) {
-			pr_err("nf: failed to register kprobe on reboot: %d\n",
+			pr_err("failed to register kprobe on reboot: %d\n",
 				reboot_ret);
 			ret = reboot_ret;
 			goto err_file;
@@ -443,13 +440,13 @@ static int __init mod_init(void)
 	} else {
 		syscall_ret = syscall_hook_init();
 		if (syscall_ret < 0)
-			pr_err("nf: syscall install hook unavailable: %d\n",
+			pr_err("syscall install hook unavailable: %d\n",
 				syscall_ret);
 	}
 
 	reboot_ret = register_kprobe(&kp_reboot);
 	if (reboot_ret < 0) {
-		pr_err("nf: failed to register kprobe on reboot: %d\n",
+		pr_err("failed to register kprobe on reboot: %d\n",
 			reboot_ret);
 	} else {
 		g_reboot_kprobe_registered = 1;
@@ -461,7 +458,7 @@ static int __init mod_init(void)
 	if (dfm_stage == DFM_STAGE_NO_SYSCALL && reboot_ret < 0) {
 		syscall_ret = syscall_hook_init();
 		if (syscall_ret < 0)
-			pr_err("nf: syscall fallback unavailable: %d\n",
+			pr_err("syscall fallback unavailable: %d\n",
 				syscall_ret);
 	}
 
