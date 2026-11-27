@@ -366,6 +366,32 @@ jobs:
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -F draft=false -f make_latest=true >/dev/null
 
+      - name: Keep only the latest release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEEP_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          # Remove every older release and its tag; keep only the one just published.
+          mapfile -t tags < <(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          for tag in "${tags[@]}"; do
+            if [ "$tag" = "$KEEP_TAG" ]; then
+              continue
+            fi
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
+          # Remove tags left without a release as well.
+          mapfile -t refs < <(gh api --paginate "repos/$GH_REPO/git/refs/tags" --jq '.[].ref')
+          for ref in "${refs[@]}"; do
+            tag="${ref#refs/tags/}"
+            if [ "$tag" = "$KEEP_TAG" ]; then
+              continue
+            fi
+            gh api --method DELETE "repos/$GH_REPO/git/refs/tags/$tag" || true
+          done
+
       - name: Delete incomplete release
         if: ${{ (failure() || cancelled()) && steps.release.outputs.release_id != '' }}
         env:
