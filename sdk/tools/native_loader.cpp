@@ -893,21 +893,11 @@ static bool unload_legacy_modules() {
     return !proc_module_present("bs");
 }
 
-/* /sys/module/dfm/version is created from MODULE_VERSION; a foreign module that
- * happens to be called "dfm" will not carry our version string. */
+/* enenkernel has no MODULE_VERSION. Identify our module by the root-only
+ * dfm_stage parameter, which foreign dfm modules do not expose. 1.8 remains
+ * the loader/update version, not a kernel module version. */
 static bool loaded_module_is_ours() {
-    std::FILE* file = std::fopen("/sys/module/dfm/version", "r");
-    if (!file)
-        return false;
-    char line[64] = {0};
-    const bool read_ok = std::fgets(line, sizeof(line), file) != nullptr;
-    std::fclose(file);
-    if (!read_ok)
-        return false;
-    std::string value(line);
-    while (!value.empty() && (value.back() == '\n' || value.back() == '\r'))
-        value.pop_back();
-    return value == DFM_EMBEDDED_MODULE_VERSION;
+    return std::access("/sys/module/dfm/parameters/dfm_stage", F_OK) == 0;
 }
 
 /* Diagnostic stages 1-3 return from mod_init before any fd-install entry is
@@ -1238,7 +1228,7 @@ static int load_kmi(const char* kmi, const std::string& params,
     }
     if (is_module_loaded()) {
         if (!loaded_module_is_ours()) {
-            err("已存在同名但非本驱动的模块（/sys/module/dfm 版本不符）");
+            err("已存在同名但非本驱动的模块（缺少 dfm_stage 参数）");
             return kExitFailure;
         }
         const int stage = loaded_module_stage();

@@ -38,7 +38,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("DFM");
 MODULE_DESCRIPTION("DFM lab debug module");
-MODULE_VERSION(DFM_MODULE_VERSION);
+/* enenkernel has no MODULE_VERSION; 1.8 is the loader version only. */
 
 /* ---- ioctl dispatcher ---- */
 

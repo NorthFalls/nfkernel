@@ -35,6 +35,13 @@
 #include <asm/pgtable.h>
 #include <asm/unistd.h>
 #include <asm-generic/fixmap.h>
+#include <asm/fixmap.h>
+
+/* Use the same direct kernel text-poke helpers as enenkernel. Indirect calls
+ * via compat function pointers trip CFI on GKI and reboot the device. */
+#undef __set_fixmap
+#undef copy_to_kernel_nofault
+#undef dcache_clean_inval_poc
 
 #include "abi.h"
 #include "install.h"
@@ -51,15 +58,11 @@ static void syscall_flush_cache(void *start, size_t len)
     unsigned long begin = (unsigned long)start;
     unsigned long end = begin + len;
 
-    if (dfm_dcache_clean_inval_poc) {
-        dfm_dcache_clean_inval_poc(begin, end);
-        return;
-    }
-    if (dfm___flush_dcache_area) {
-        dfm___flush_dcache_area(start, len);
-        return;
-    }
-    flush_icache_range(begin, end);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+    dcache_clean_inval_poc(begin, end);
+#else
+    __flush_dcache_area(start, len);
+#endif
 }
 static void syscall_rcu_tasks_drain(void)
 {
@@ -180,12 +183,9 @@ static int syscall_patch_text_nosync(void *dst, const void *src, size_t len)
     if (err)
         return err;
 
-    if (!dfm___set_fixmap)
-        return -EOPNOTSUPP;
-    dfm___set_fixmap(FIX_TEXT_POKE0, phys, PAGE_KERNEL);
-    map = (void *)__fix_to_virt(FIX_TEXT_POKE0) + (phys & ~PAGE_MASK);
+    map = (void *)set_fixmap_offset(FIX_TEXT_POKE0, phys);
     ret = (int)copy_to_kernel_nofault(map, src, len);
-    dfm___set_fixmap(FIX_TEXT_POKE0, 0, __pgprot(0));
+    clear_fixmap(FIX_TEXT_POKE0);
 
     if (!ret)
         syscall_flush_dcache(dst, len);
