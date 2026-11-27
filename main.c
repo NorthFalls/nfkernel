@@ -408,9 +408,10 @@ static struct kprobe kp_sys_ni = {
 
 /* ---- module init/exit ---- */
 
-/* Default to 6: skip the syscall-table hook (unstable on GKI/CFI kernels)
- * and install the fd through the ni-syscall/reboot kprobes instead. */
-static int dfm_stage = DFM_STAGE_NO_SYSCALL;
+/* Match enenkernel: install the syscall-table hook by default.  The kprobe
+ * fallback cannot suppress enenkernel's final reboot() probe, so clients
+ * that scan unused syscalls only work through the table hook. */
+static int dfm_stage = DFM_STAGE_FULL;
 /* Readable so the loader can distinguish a stage-1/2/3 diagnostic load (no
  * fd-install entry) from a usable module; the value is only supplied at
  * finit_module time. */
@@ -483,9 +484,12 @@ static int __init mod_init(void)
 		dfm_info("skipping syscall hook, using ni/reboot kprobes\n");
 	} else {
 		syscall_ret = syscall_hook_init();
-		if (syscall_ret < 0)
+		if (syscall_ret < 0) {
 			pr_err("syscall install hook unavailable: %d\n",
 				syscall_ret);
+			ret = syscall_ret;
+			goto err_file;
+		}
 	}
 
 	reboot_ret = register_kprobe(&kp_reboot);
