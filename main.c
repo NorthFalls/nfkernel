@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/syscalls.h>
+#include <linux/kobject.h>
 
 #include "abi.h"
 #include "install.h"
@@ -251,16 +252,6 @@ static int g_reboot_kprobe_registered;
 static int g_ni_kprobe_registered;
 static int g_sys_ni_kprobe_registered;
 
-/* Diagnostic: number of magic syscalls that reached the fd installer. */
-static int g_fd_entry_probe;
-static int g_hook_nr = -1;
-static int g_reboot_hook_installed;
-module_param_named(dfm_fd_entry_probe, g_fd_entry_probe, int, 0444);
-module_param_named(dfm_ni_kprobe, g_ni_kprobe_registered, int, 0444);
-module_param_named(dfm_sys_ni_kprobe, g_sys_ni_kprobe_registered, int, 0444);
-module_param_named(dfm_hook_nr, g_hook_nr, int, 0444);
-module_param_named(dfm_reboot_hook, g_reboot_hook_installed, int, 0444);
-
 /* ---- fd installation ---- */
 
 static int install_fd(int __user *outp)
@@ -342,7 +333,6 @@ static int install_from_user_regs(struct pt_regs *real_regs)
     if (magic1 != INSTALL_MAGIC1 || magic2 != INSTALL_MAGIC2)
         return 0;
 
-    g_fd_entry_probe++;
 
     if (current_uid().val > 1000)
         return 0;
@@ -477,8 +467,6 @@ static int __init mod_init(void)
 			ret = syscall_ret;
 			goto err_file;
 		}
-		g_hook_nr = syscall_hook_nr();
-		g_reboot_hook_installed = syscall_reboot_hook_installed();
 		return 0;
 	}
 
@@ -505,8 +493,6 @@ static int __init mod_init(void)
 			ret = syscall_ret;
 			goto err_file;
 		}
-		g_hook_nr = syscall_hook_nr();
-		g_reboot_hook_installed = syscall_reboot_hook_installed();
 	}
 
 	reboot_ret = register_kprobe(&kp_reboot);
@@ -555,9 +541,10 @@ static int __init mod_init(void)
 
 	(void)kgsl_hide_init();
 
-	dfm_info("module loaded, syscall_nr=%d reboot_kprobe=%d ni_kprobe=%d\n",
-		syscall_hook_nr(), g_reboot_kprobe_registered,
-		g_ni_kprobe_registered);
+	/* Match enenkernel: drop the module's sysfs kobject so /sys/module/dfm
+	 * disappears. Module parameters and the loader's temporary stage
+	 * argument are not exposed after init. */
+	kobject_del(&THIS_MODULE->mkobj.kobj);
 	return 0;
 
 err_hooks:

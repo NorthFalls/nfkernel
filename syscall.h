@@ -7,8 +7,6 @@ struct pt_regs;
 
 int  syscall_hook_init(void);
 void syscall_hook_exit(void);
-int  syscall_hook_nr(void);
-int  syscall_reboot_hook_installed(void);
 
 int  syscall_cpu_clock_init(void);
 void syscall_cpu_clock_exit(void);

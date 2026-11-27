@@ -893,24 +893,6 @@ static bool unload_legacy_modules() {
     return !proc_module_present("bs");
 }
 
-/* enenkernel has no MODULE_VERSION. Identify our module by the root-only
- * dfm_stage parameter, which foreign dfm modules do not expose. 1.8 remains
- * the loader/update version, not a kernel module version. */
-static bool loaded_module_is_ours() {
-    return access("/sys/module/dfm/parameters/dfm_stage", F_OK) == 0;
-}
-
-static int loaded_reboot_hook() {
-    std::FILE* file = std::fopen("/sys/module/dfm/parameters/dfm_reboot_hook", "r");
-    if (!file)
-        return -1;
-    int value = -1;
-    if (std::fscanf(file, "%d", &value) != 1)
-        value = -1;
-    std::fclose(file);
-    return value;
-}
-
 static int detect_kmi_index(std::string* release) {
     struct utsname info;
     if (uname(&info) != 0) {
@@ -1224,14 +1206,9 @@ static int load_kmi(const char* kmi, const std::string& params,
         }
     }
     if (is_module_loaded()) {
-        if (!loaded_module_is_ours()) {
-            err("已存在同名但非本驱动的模块（缺少 dfm_stage 参数）");
-            return kExitFailure;
-        }
         /* A previously loaded build must not be mistaken for the module
-         * embedded in this loader. Without this replacement, flashing a new
-         * loader silently kept the old module (and its old hooks) running. */
-        info("检测到已加载的 dfm，正在替换为本次内置版本...");
+         * embedded in this loader. Replace it silently; the module hides its
+         * sysfs kobject, so /proc/modules is the only identity check. */
         if (syscall(__NR_delete_module, "dfm", kO_NONBLOCK) != 0) {
             err("旧模块卸载失败，请重启设备后再加载");
             return kExitFailure;
@@ -1258,8 +1235,7 @@ static int load_kmi(const char* kmi, const std::string& params,
     int stage = kLoadMemfd;
     const int error = load_module_bytes(ko.data(), ko.size(), params, &stage);
     if (error != 0) {
-        if (stage == kLoadFinit && error == EEXIST &&
-            loaded_module_is_ours()) {
+        if (stage == kLoadFinit && error == EEXIST && is_module_loaded()) {
             ok("内核模块加载成功!");
             return kExitOk;
         }
@@ -1268,12 +1244,9 @@ static int load_kmi(const char* kmi, const std::string& params,
             std::printf("%s[-] 已打印dmesg日志!%s\n", kMagenta, kReset);
         return kExitFailure;
     }
-    if (!is_module_loaded() || !loaded_module_is_ours()) {
+    if (!is_module_loaded()) {
         err("内核模块加载后校验失败!");
         return kExitFailure;
-    }
-    if (loaded_reboot_hook() != 1) {
-        err("reboot hook 未安装，enen 扫描失败时仍会重启");
     }
     ok("内核模块加载成功!");
     return kExitOk;

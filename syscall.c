@@ -438,16 +438,6 @@ void syscall_hook_exit(void)
     g_orig_syscall = NULL;
 }
 
-int syscall_hook_nr(void)
-{
-    return g_hooked_nr;
-}
-
-int syscall_reboot_hook_installed(void)
-{
-    return g_reboot_hooked;
-}
-
 /* A syscall-table reader may have fetched our address before restoration,
  * and copy_to_user() can sleep. Both Tasks RCU and SRCU are required for
  * teardown; ordinary RCU alone does not protect this call path.
