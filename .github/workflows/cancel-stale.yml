@@ -1,0 +1,35 @@
+name: Cancel stale tag builds
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel non-main workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for round in 1 2 3 4 5; do
+            ids=$(gh run list --limit 100 \
+              --json databaseId,headBranch,status \
+              --jq '.[] | select((.headBranch // "") != "main" and .status != "completed") | .databaseId')
+            if [ -z "$ids" ]; then
+              echo "no stale runs (round $round)"
+              break
+            fi
+            for id in $ids; do
+              echo "cancel $id"
+              gh run cancel "$id" || true
+            done
+            sleep 10
+          done
