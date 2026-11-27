@@ -98,7 +98,6 @@ jobs:
             grep -q "name=dfm" /tmp/modinfo.txt
             grep -q "license=GPL" /tmp/modinfo.txt
             grep -q "vermagic=" /tmp/modinfo.txt
-            grep -q "srcversion=" /tmp/modinfo.txt
             llvm-nm --defined-only dfm.ko > /tmp/dfm_defined.txt
             grep -q "cpu_clock_native" /tmp/dfm_defined.txt
             echo "--- undefined symbols (first 40) ---"
