@@ -248,6 +248,7 @@ static const struct file_operations drv_fops = {
 };
 
 static int g_reboot_kprobe_registered;
+static int g_ni_kprobe_registered;
 
 /* ---- fd installation ---- */
 
@@ -364,10 +365,19 @@ static struct kprobe kp_reboot = {
     .pre_handler = reboot_handler_pre,
 };
 
+/* enenkernel clients do not look at /sys/module/dfm: they probe unused syscall
+ * numbers until one writes the control fd into their buffer. Those numbers all
+ * dispatch to __arm64_sys_ni_syscall, so a kprobe there makes the fd reachable
+ * without patching the read-only syscall table (stage 0). */
+static struct kprobe kp_ni = {
+    .symbol_name = "__arm64_sys_ni_syscall",
+    .pre_handler = reboot_handler_pre,
+};
+
 /* ---- module init/exit ---- */
 
 /* Default to 6: skip the syscall-table hook (unstable on GKI/CFI kernels)
- * and install the fd through the reboot kprobe instead. */
+ * and install the fd through the ni-syscall/reboot kprobes instead. */
 static int dfm_stage = DFM_STAGE_NO_SYSCALL;
 /* Readable so the loader can distinguish a stage-1/2/3 diagnostic load (no
  * fd-install entry) from a usable module; the value is only supplied at
@@ -379,6 +389,7 @@ static int __init mod_init(void)
 	int ret;
 	int syscall_ret;
 	int reboot_ret;
+	int ni_ret = -ENOENT;
 
 	ret = dfm_compat_init();
 	if (ret < 0) {
@@ -436,7 +447,7 @@ static int __init mod_init(void)
 
 	if (dfm_stage == DFM_STAGE_NO_SYSCALL) {
 		syscall_ret = -ENOENT;
-		dfm_info("skipping syscall hook, using reboot kprobe only\n");
+		dfm_info("skipping syscall hook, using ni/reboot kprobes\n");
 	} else {
 		syscall_ret = syscall_hook_init();
 		if (syscall_ret < 0)
@@ -452,17 +463,28 @@ static int __init mod_init(void)
 		g_reboot_kprobe_registered = 1;
 	}
 
-	/* Some vendor kernels do not expose __arm64_sys_reboot to kprobes even
-	 * though the syscall-table hook works. In the default no-syscall stage,
-	 * retry through the syscall hook instead of failing the whole load. */
-	if (dfm_stage == DFM_STAGE_NO_SYSCALL && reboot_ret < 0) {
-		syscall_ret = syscall_hook_init();
-		if (syscall_ret < 0)
-			pr_err("syscall fallback unavailable: %d\n",
-				syscall_ret);
+	ni_ret = -ENOENT;
+	if (syscall_ret < 0) {
+		ni_ret = register_kprobe(&kp_ni);
+		if (ni_ret < 0) {
+			pr_err("failed to register kprobe on ni_syscall: %d\n",
+				ni_ret);
+		} else {
+			g_ni_kprobe_registered = 1;
+		}
 	}
 
-	if (syscall_ret < 0 && reboot_ret < 0) {
+	/* Never patch the syscall table implicitly here: stage 0 is exactly the
+	 * stop_machine/text-patch path that hangs some GKI builds. If neither
+	 * kprobe is available, fail the load instead of falling back silently. */
+	if (dfm_stage == DFM_STAGE_NO_SYSCALL && reboot_ret < 0 &&
+	    ni_ret < 0) {
+		pr_err("no kprobe fd entry; refusing implicit syscall hook\n");
+		ret = -ENOENT;
+		goto err_hooks;
+	}
+
+	if (syscall_ret < 0 && reboot_ret < 0 && ni_ret < 0) {
 		pr_err("no fd install entry registered\n");
 		ret = reboot_ret;
 		goto err_hooks;
@@ -470,8 +492,9 @@ static int __init mod_init(void)
 
 	(void)kgsl_hide_init();
 
-	dfm_info("module loaded, syscall_nr=%d reboot_fallback=%d\n",
-		syscall_hook_nr(), g_reboot_kprobe_registered);
+	dfm_info("module loaded, syscall_nr=%d reboot_kprobe=%d ni_kprobe=%d\n",
+		syscall_hook_nr(), g_reboot_kprobe_registered,
+		g_ni_kprobe_registered);
 	return 0;
 
 err_hooks:
@@ -550,6 +573,10 @@ static void __exit mod_exit(void)
     if (g_reboot_kprobe_registered) {
         unregister_kprobe(&kp_reboot);
         g_reboot_kprobe_registered = 0;
+    }
+    if (g_ni_kprobe_registered) {
+        unregister_kprobe(&kp_ni);
+        g_ni_kprobe_registered = 0;
     }
     syscall_hook_exit();
     udp_capture_exit();
