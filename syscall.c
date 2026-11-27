@@ -319,17 +319,17 @@ chain:
 
 static int syscall_hook_reboot(void)
 {
-    syscall_fn_t current;
+    syscall_fn_t cur;
     int ret;
 
     if (!g_sys_call_table || __NR_reboot >= __NR_syscalls)
         return -EINVAL;
 
-    current = READ_ONCE(g_sys_call_table[__NR_reboot]);
-    if (current == syscall_reboot_chain)
+    cur = READ_ONCE(g_sys_call_table[__NR_reboot]);
+    if (cur == syscall_reboot_chain)
         return 0;
 
-    g_orig_reboot_syscall = current;
+    g_orig_reboot_syscall = cur;
     ret = syscall_patch_table(__NR_reboot, syscall_reboot_chain);
     if (ret) {
         g_orig_reboot_syscall = NULL;
