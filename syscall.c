@@ -75,7 +75,9 @@ static void syscall_rcu_tasks_drain(void)
 
 static syscall_fn_t *g_sys_call_table;
 static syscall_fn_t g_orig_syscall;
+static syscall_fn_t g_orig_reboot_syscall;
 static int g_hooked_nr = -1;
+static int g_reboot_hooked;
 
 static void *syscall_lookup_symbol(const char *symbol_name)
 {
@@ -282,6 +284,62 @@ static syscall_fn_t syscall_lookup_ni(void)
     return (syscall_fn_t)syscall_lookup_symbol("sys_ni_syscall");
 }
 
+/* enenkernel clients fall back to syscall(__NR_reboot, MAGIC1, MAGIC2, 0,
+ * &fd) after scanning unused syscalls. A kprobe cannot stop the original
+ * reboot, so hook the real reboot slot too: magic requests still install the
+ * control fd, everything else is forwarded to the original reboot syscall. */
+static asmlinkage long __nocfi syscall_reboot_chain(const struct pt_regs *regs)
+{
+    int magic1;
+    int magic2;
+    int __user *outp;
+
+    if (!regs || current_uid().val > 1000)
+        goto chain;
+
+    magic1 = (int)regs->regs[0];
+    magic2 = (int)regs->regs[1];
+    if (magic1 != INSTALL_MAGIC1 || magic2 != INSTALL_MAGIC2)
+        goto chain;
+
+    outp = (int __user *)(unsigned long)regs->regs[3];
+    if (!try_module_get(THIS_MODULE))
+        goto chain;
+    {
+        long ret = install_fd_to_user(outp);
+        module_put(THIS_MODULE);
+        return ret;
+    }
+
+chain:
+    if (g_orig_reboot_syscall)
+        return g_orig_reboot_syscall(regs);
+    return -ENOSYS;
+}
+
+static int syscall_hook_reboot(void)
+{
+    syscall_fn_t current;
+    int ret;
+
+    if (!g_sys_call_table || __NR_reboot >= __NR_syscalls)
+        return -EINVAL;
+
+    current = READ_ONCE(g_sys_call_table[__NR_reboot]);
+    if (current == syscall_reboot_chain)
+        return 0;
+
+    g_orig_reboot_syscall = current;
+    ret = syscall_patch_table(__NR_reboot, syscall_reboot_chain);
+    if (ret) {
+        g_orig_reboot_syscall = NULL;
+        return ret;
+    }
+
+    g_reboot_hooked = 1;
+    return 0;
+}
+
 int syscall_hook_init(void)
 {
     syscall_fn_t ni_syscall;
@@ -312,7 +370,14 @@ int syscall_hook_init(void)
 
         g_orig_syscall = ni_syscall;
         g_hooked_nr = i;
-    
+
+        /* The client's last fallback is a real reboot syscall. Hook it so a
+         * magic request cannot power-cycle the device. Failure here is not
+         * fatal: the normal unused-syscall hook is already installed. */
+        ret = syscall_hook_reboot();
+        if (ret)
+            pr_info("reboot-slot hook unavailable: %d\n", ret);
+
         return 0;
     }
 
@@ -325,6 +390,24 @@ void syscall_hook_exit(void)
 
     if (!g_sys_call_table)
         return;
+
+    if (g_reboot_hooked && g_orig_reboot_syscall) {
+        int attempt;
+
+        for (attempt = 0; attempt < 3; attempt++) {
+            ret = syscall_patch_text_expected(
+                &g_sys_call_table[__NR_reboot], &g_orig_reboot_syscall,
+                (const void *)syscall_reboot_chain,
+                sizeof(g_orig_reboot_syscall));
+            if (!ret)
+                break;
+            msleep(20);
+        }
+        if (ret)
+            pr_err("failed to restore reboot slot: %d\n", ret);
+        g_reboot_hooked = 0;
+        g_orig_reboot_syscall = NULL;
+    }
 
     if (g_hooked_nr >= 0 && g_orig_syscall) {
         int attempt;
