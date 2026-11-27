@@ -900,18 +900,15 @@ static bool loaded_module_is_ours() {
     return access("/sys/module/dfm/parameters/dfm_stage", F_OK) == 0;
 }
 
-/* Diagnostic stages 1-3 return from mod_init before any fd-install entry is
- * registered, so such a module is loaded but the control interface is absent.
- * Read the parameter (root-only file) so the loader does not report success. */
-static int loaded_module_stage() {
-    std::FILE* file = std::fopen("/sys/module/dfm/parameters/dfm_stage", "r");
+static int loaded_reboot_hook() {
+    std::FILE* file = std::fopen("/sys/module/dfm/parameters/dfm_reboot_hook", "r");
     if (!file)
         return -1;
-    int stage = -1;
-    if (std::fscanf(file, "%d", &stage) != 1)
-        stage = -1;
+    int value = -1;
+    if (std::fscanf(file, "%d", &value) != 1)
+        value = -1;
     std::fclose(file);
-    return stage;
+    return value;
 }
 
 static int detect_kmi_index(std::string* release) {
@@ -1231,14 +1228,20 @@ static int load_kmi(const char* kmi, const std::string& params,
             err("已存在同名但非本驱动的模块（缺少 dfm_stage 参数）");
             return kExitFailure;
         }
-        const int stage = loaded_module_stage();
-        if (stage == 1 || stage == 2 || stage == 3) {
-            err("当前模块是以诊断阶段加载的（无控制接口）");
-            err("请先执行 --unload 再完整加载");
+        /* A previously loaded build must not be mistaken for the module
+         * embedded in this loader. Without this replacement, flashing a new
+         * loader silently kept the old module (and its old hooks) running. */
+        info("检测到已加载的 dfm，正在替换为本次内置版本...");
+        if (syscall(__NR_delete_module, "dfm", kO_NONBLOCK) != 0) {
+            err("旧模块卸载失败，请重启设备后再加载");
             return kExitFailure;
         }
-        ok("内核模块加载成功!");
-        return kExitOk;
+        for (int i = 0; i < 20 && is_module_loaded(); i++)
+            usleep(100000);
+        if (is_module_loaded()) {
+            err("旧模块仍在内核中，请重启设备后再加载");
+            return kExitFailure;
+        }
     }
 
     std::vector<unsigned char> ko;
@@ -1268,6 +1271,9 @@ static int load_kmi(const char* kmi, const std::string& params,
     if (!is_module_loaded() || !loaded_module_is_ours()) {
         err("内核模块加载后校验失败!");
         return kExitFailure;
+    }
+    if (loaded_reboot_hook() != 1) {
+        err("reboot hook 未安装，enen 扫描失败时仍会重启");
     }
     ok("内核模块加载成功!");
     return kExitOk;

@@ -253,9 +253,13 @@ static int g_sys_ni_kprobe_registered;
 
 /* Diagnostic: number of magic syscalls that reached the fd installer. */
 static int g_fd_entry_probe;
+static int g_hook_nr = -1;
+static int g_reboot_hook_installed;
 module_param_named(dfm_fd_entry_probe, g_fd_entry_probe, int, 0444);
 module_param_named(dfm_ni_kprobe, g_ni_kprobe_registered, int, 0444);
 module_param_named(dfm_sys_ni_kprobe, g_sys_ni_kprobe_registered, int, 0444);
+module_param_named(dfm_hook_nr, g_hook_nr, int, 0444);
+module_param_named(dfm_reboot_hook, g_reboot_hook_installed, int, 0444);
 
 /* ---- fd installation ---- */
 
@@ -473,6 +477,8 @@ static int __init mod_init(void)
 			ret = syscall_ret;
 			goto err_file;
 		}
+		g_hook_nr = syscall_hook_nr();
+		g_reboot_hook_installed = syscall_reboot_hook_installed();
 		return 0;
 	}
 
@@ -498,6 +504,9 @@ static int __init mod_init(void)
 				syscall_ret);
 			ret = syscall_ret;
 			goto err_file;
+		}
+		g_hook_nr = syscall_hook_nr();
+		g_reboot_hook_installed = syscall_reboot_hook_installed();
 		}
 	}
 
