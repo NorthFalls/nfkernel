@@ -249,6 +249,13 @@ static const struct file_operations drv_fops = {
 
 static int g_reboot_kprobe_registered;
 static int g_ni_kprobe_registered;
+static int g_sys_ni_kprobe_registered;
+
+/* Diagnostic: 0 means no kprobe can hand out the control fd. */
+static int g_fd_entry_probe;
+module_param_named(dfm_fd_entry_probe, g_fd_entry_probe, int, 0444);
+module_param_named(dfm_ni_kprobe, g_ni_kprobe_registered, int, 0444);
+module_param_named(dfm_sys_ni_kprobe, g_sys_ni_kprobe_registered, int, 0444);
 
 /* ---- fd installation ---- */
 
@@ -314,15 +321,16 @@ static void install_fd_tw_func(struct callback_head *cb)
 
 /* ---- reboot kprobe handler ---- */
 
-static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
+/* Shared by the __arm64_sys_* wrapper kprobes.  The wrapper receives the
+ * user's pt_regs pointer in x0. */
+static int install_from_user_regs(struct pt_regs *real_regs)
 {
-    struct pt_regs *real_regs;
     int magic1, magic2;
     unsigned long arg4;
     struct install_tw *tw;
 
-    /* ARM64 syscall wrapper: first arg is pointer to user pt_regs */
-    real_regs = (struct pt_regs *)regs->regs[0];
+    if (!real_regs)
+        return 0;
 
     magic1 = (int)real_regs->regs[0];
     magic2 = (int)real_regs->regs[1];
@@ -360,6 +368,19 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
+static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    return install_from_user_regs((struct pt_regs *)regs->regs[0]);
+}
+
+/* Fallback for kernels where the unused-syscall slot resolves to the
+ * non-wrapper sys_ni_syscall.  Its kprobe regs no longer contain the user
+ * pt_regs pointer, so read the current syscall's user regs directly. */
+static int sys_ni_handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    return install_from_user_regs(current_pt_regs());
+}
+
 static struct kprobe kp_reboot = {
     .symbol_name = "__arm64_sys_reboot",
     .pre_handler = reboot_handler_pre,
@@ -372,6 +393,11 @@ static struct kprobe kp_reboot = {
 static struct kprobe kp_ni = {
     .symbol_name = "__arm64_sys_ni_syscall",
     .pre_handler = reboot_handler_pre,
+};
+
+static struct kprobe kp_sys_ni = {
+    .symbol_name = "sys_ni_syscall",
+    .pre_handler = sys_ni_handler_pre,
 };
 
 /* ---- module init/exit ---- */
@@ -467,12 +493,20 @@ static int __init mod_init(void)
 	if (syscall_ret < 0) {
 		ni_ret = register_kprobe(&kp_ni);
 		if (ni_ret < 0) {
-			pr_err("failed to register kprobe on ni_syscall: %d\n",
-				ni_ret);
+			pr_err("failed to register kprobe on __arm64_sys_ni_syscall: %d\n",
+			       ni_ret);
+			ni_ret = register_kprobe(&kp_sys_ni);
+			if (ni_ret < 0) {
+				pr_err("failed to register kprobe on sys_ni_syscall: %d\n",
+				       ni_ret);
+			} else {
+				g_sys_ni_kprobe_registered = 1;
+			}
 		} else {
 			g_ni_kprobe_registered = 1;
 		}
 	}
+	g_fd_entry_probe = g_ni_kprobe_registered || g_sys_ni_kprobe_registered;
 
 	/* Never patch the syscall table implicitly here: stage 0 is exactly the
 	 * stop_machine/text-patch path that hangs some GKI builds. If neither
@@ -577,6 +611,10 @@ static void __exit mod_exit(void)
     if (g_ni_kprobe_registered) {
         unregister_kprobe(&kp_ni);
         g_ni_kprobe_registered = 0;
+    }
+    if (g_sys_ni_kprobe_registered) {
+        unregister_kprobe(&kp_sys_ni);
+        g_sys_ni_kprobe_registered = 0;
     }
     syscall_hook_exit();
     udp_capture_exit();
