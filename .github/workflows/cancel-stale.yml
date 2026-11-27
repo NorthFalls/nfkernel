@@ -19,17 +19,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100"
           for round in 1 2 3 4 5; do
-            ids=$(gh run list --limit 100 \
-              --json databaseId,headBranch,status \
-              --jq '.[] | select((.headBranch // "") != "main" and .status != "completed") | .databaseId')
+            ids=$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
+              | jq -r '.workflow_runs[] | select(.head_branch != "main" and .status != "completed") | .id')
             if [ -z "$ids" ]; then
               echo "no stale runs (round $round)"
               break
             fi
             for id in $ids; do
               echo "cancel $id"
-              gh run cancel "$id" || true
+              curl -fsS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${id}/cancel" || true
             done
             sleep 10
           done
