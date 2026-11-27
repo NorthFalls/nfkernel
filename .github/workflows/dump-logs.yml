@@ -1,0 +1,23 @@
+name: dump-logs
+on:
+  workflow_run:
+    workflows: ["Build and release kernel and SDK"]
+    types: [completed]
+permissions:
+  actions: read
+  contents: write
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh run view "$RID" --log > build-log.txt || true
+          git config user.name 'NorthFall'
+          git config user.email '356526599+NorthFalls@users.noreply.github.com'
+          git add build-log.txt
+          git commit -m 'debug build log [skip ci]' || true
+          git push
