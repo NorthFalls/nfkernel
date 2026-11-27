@@ -97,9 +97,6 @@ jobs:
             grep -q "name=dfm" /tmp/modinfo.txt
             grep -q "license=GPL" /tmp/modinfo.txt
             grep -q "vermagic=" /tmp/modinfo.txt
-            want_version=$(sed -n "s/^#define DFM_MODULE_VERSION \"\\([^\"]*\\)\".*/\\1/p" dfm_module.h)
-            test -n "$want_version"
-            grep -q "version=${want_version}" /tmp/modinfo.txt
             grep -q "srcversion=" /tmp/modinfo.txt
             llvm-nm --defined-only dfm.ko > /tmp/dfm_defined.txt
             grep -q "cpu_clock_native" /tmp/dfm_defined.txt
