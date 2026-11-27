@@ -430,8 +430,17 @@ static int __init mod_init(void)
 		pr_err("compat init failed: %d\n", ret);
 		return ret;
 	}
-	if (dfm_compat_missing)
-		return 0;
+	if (dfm_compat_missing) {
+		/* A usable module must hand out the control fd; a degraded load
+		 * looks successful to the loader but enen then falls back to its
+		 * reboot-probe and the phone restarts. Keep stage 1 for diagnostics,
+		 * but refuse the normal full load. */
+		if (dfm_stage == DFM_STAGE_COMPAT)
+			return 0;
+		pr_err("required compat symbols missing: %u; refusing usable load\n",
+		       dfm_compat_missing);
+		return -ENOENT;
+	}
 
 	dfm_info("compat ready, stage=%d\n", dfm_stage);
 	if (dfm_stage == DFM_STAGE_COMPAT)
