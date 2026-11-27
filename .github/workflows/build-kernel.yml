@@ -313,7 +313,7 @@ jobs:
         if: github.event_name != 'pull_request'
         id: release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           # Release identity matches enkernel: a UTC timestamp in the name and
@@ -336,7 +336,7 @@ jobs:
       - name: Upload, verify and publish release
         if: github.event_name != 'pull_request'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
@@ -369,7 +369,7 @@ jobs:
       - name: Delete incomplete release
         if: ${{ (failure() || cancelled()) && steps.release.outputs.release_id != '' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
         run: |
