@@ -43,6 +43,12 @@
 #undef copy_to_kernel_nofault
 #undef dcache_clean_inval_poc
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+extern void dcache_clean_inval_poc(unsigned long start, unsigned long end);
+#else
+extern void __flush_dcache_area(void *addr, size_t len);
+#endif
+
 #include "abi.h"
 #include "install.h"
 #include "syscall.h"
@@ -55,11 +61,8 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
 
 static void syscall_flush_cache(void *start, size_t len)
 {
-    unsigned long begin = (unsigned long)start;
-    unsigned long end = begin + len;
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
-    dcache_clean_inval_poc(begin, end);
+    dcache_clean_inval_poc((unsigned long)start, (unsigned long)start + len);
 #else
     __flush_dcache_area(start, len);
 #endif
