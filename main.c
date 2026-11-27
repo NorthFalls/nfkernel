@@ -251,7 +251,7 @@ static int g_reboot_kprobe_registered;
 static int g_ni_kprobe_registered;
 static int g_sys_ni_kprobe_registered;
 
-/* Diagnostic: 0 means no kprobe can hand out the control fd. */
+/* Diagnostic: number of magic syscalls that reached the fd installer. */
 static int g_fd_entry_probe;
 module_param_named(dfm_fd_entry_probe, g_fd_entry_probe, int, 0444);
 module_param_named(dfm_ni_kprobe, g_ni_kprobe_registered, int, 0444);
@@ -338,6 +338,8 @@ static int install_from_user_regs(struct pt_regs *real_regs)
     if (magic1 != INSTALL_MAGIC1 || magic2 != INSTALL_MAGIC2)
         return 0;
 
+    g_fd_entry_probe++;
+
     if (current_uid().val > 1000)
         return 0;
 
@@ -416,6 +418,7 @@ static int __init mod_init(void)
 	int syscall_ret;
 	int reboot_ret;
 	int ni_ret = -ENOENT;
+	int sys_ni_ret = -ENOENT;
 
 	ret = dfm_compat_init();
 	if (ret < 0) {
@@ -490,23 +493,24 @@ static int __init mod_init(void)
 	}
 
 	ni_ret = -ENOENT;
+	sys_ni_ret = -ENOENT;
 	if (syscall_ret < 0) {
 		ni_ret = register_kprobe(&kp_ni);
-		if (ni_ret < 0) {
+		if (ni_ret < 0)
 			pr_err("failed to register kprobe on __arm64_sys_ni_syscall: %d\n",
 			       ni_ret);
-			ni_ret = register_kprobe(&kp_sys_ni);
-			if (ni_ret < 0) {
-				pr_err("failed to register kprobe on sys_ni_syscall: %d\n",
-				       ni_ret);
-			} else {
-				g_sys_ni_kprobe_registered = 1;
-			}
-		} else {
+		else
 			g_ni_kprobe_registered = 1;
-		}
+
+		sys_ni_ret = register_kprobe(&kp_sys_ni);
+		if (sys_ni_ret < 0)
+			pr_err("failed to register kprobe on sys_ni_syscall: %d\n",
+			       sys_ni_ret);
+		else
+			g_sys_ni_kprobe_registered = 1;
 	}
-	g_fd_entry_probe = g_ni_kprobe_registered || g_sys_ni_kprobe_registered;
+	if (ni_ret < 0)
+		ni_ret = sys_ni_ret;
 
 	/* Never patch the syscall table implicitly here: stage 0 is exactly the
 	 * stop_machine/text-patch path that hangs some GKI builds. If neither
