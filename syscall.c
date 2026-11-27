@@ -37,17 +37,14 @@
 #include <asm-generic/fixmap.h>
 #include <asm/fixmap.h>
 
-/* Use the same direct kernel text-poke helpers as enenkernel. Indirect calls
- * via compat function pointers trip CFI on GKI and reboot the device. */
-#undef __set_fixmap
-#undef copy_to_kernel_nofault
-#undef dcache_clean_inval_poc
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
-extern void dcache_clean_inval_poc(unsigned long start, unsigned long end);
-#else
-extern void __flush_dcache_area(void *addr, size_t len);
-#endif
+/*
+ * Runtime-resolved text-poke helpers (compat.h macros).
+ *
+ * Some GKI builds do not export __set_fixmap, copy_to_kernel_nofault or
+ * dcache_clean_inval_poc, so direct references make finit_module fail with
+ * "Unknown symbol".  Resolve them through kallsyms in compat.c instead.
+ * Callers are marked __nocfi so the indirect call is not rejected by CFI.
+ */
 
 #include "abi.h"
 #include "install.h"
@@ -59,12 +56,13 @@ extern void __flush_dcache_area(void *addr, size_t len);
 
 typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
 
-static void syscall_flush_cache(void *start, size_t len)
+static void __nocfi syscall_flush_cache(void *start, size_t len)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
     dcache_clean_inval_poc((unsigned long)start, (unsigned long)start + len);
 #else
-    __flush_dcache_area(start, len);
+    if (dfm___flush_dcache_area)
+        dfm___flush_dcache_area(start, len);
 #endif
 }
 static void syscall_rcu_tasks_drain(void)
@@ -175,7 +173,7 @@ fail:
     return 0;
 }
 
-static int syscall_patch_text_nosync(void *dst, const void *src, size_t len)
+static int __nocfi syscall_patch_text_nosync(void *dst, const void *src, size_t len)
 {
     unsigned long phys;
     void *map;
