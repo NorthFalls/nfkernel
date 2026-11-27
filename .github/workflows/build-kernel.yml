@@ -63,7 +63,12 @@ jobs:
           docker run --rm --privileged -v "$PWD:/work" -w /work -e "KMI=$KMI" "$IMAGE" bash -lc '
             set -euo pipefail
             set -x
-            make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
+            if ! make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" 2>&1 | tee /tmp/make.log; then
+              grep -nE '(error:|Error [0-9]+|undefined reference)' /tmp/make.log | tail -30 | while IFS= read -r line; do
+                echo "::error::$line"
+              done
+              exit 1
+            fi
             test -s dfm.ko
             llvm-readelf -h dfm.ko > /tmp/dfm_elf_header.txt
             grep -q "AArch64" /tmp/dfm_elf_header.txt
