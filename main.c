@@ -507,7 +507,6 @@ static int __init mod_init(void)
 		}
 		g_hook_nr = syscall_hook_nr();
 		g_reboot_hook_installed = syscall_reboot_hook_installed();
-		}
 	}
 
 	reboot_ret = register_kprobe(&kp_reboot);
