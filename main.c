@@ -372,7 +372,11 @@ static int install_from_user_regs(struct pt_regs *real_regs)
 
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-    return install_from_user_regs((struct pt_regs *)regs->regs[0]);
+    /* Do not trust regs->regs[0] here: on kernels where the unused-syscall
+     * slot is a plain no-argument function, x0 is the first user argument
+     * (our magic), not a pt_regs pointer.  current_pt_regs() always gives
+     * the real user register frame for the active syscall. */
+    return install_from_user_regs(current_pt_regs());
 }
 
 /* Fallback for kernels where the unused-syscall slot resolves to the
