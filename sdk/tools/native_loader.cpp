@@ -897,7 +897,7 @@ static bool unload_legacy_modules() {
  * dfm_stage parameter, which foreign dfm modules do not expose. 1.8 remains
  * the loader/update version, not a kernel module version. */
 static bool loaded_module_is_ours() {
-    return std::access("/sys/module/dfm/parameters/dfm_stage", F_OK) == 0;
+    return access("/sys/module/dfm/parameters/dfm_stage", F_OK) == 0;
 }
 
 /* Diagnostic stages 1-3 return from mod_init before any fd-install entry is
