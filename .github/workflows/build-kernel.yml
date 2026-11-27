@@ -62,6 +62,7 @@ jobs:
           docker pull "$IMAGE"
           docker run --rm --privileged -v "$PWD:/work" -w /work -e "KMI=$KMI" "$IMAGE" bash -lc '
             set -euo pipefail
+            set -x
             make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}"
             test -s dfm.ko
             llvm-readelf -h dfm.ko > /tmp/dfm_elf_header.txt
