@@ -27,3 +27,4 @@ jobs:
           git add build-log.txt
           git commit -m 'debug build log [skip ci]' || true
           git push
+# trigger
