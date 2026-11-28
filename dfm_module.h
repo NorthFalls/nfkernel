@@ -8,6 +8,8 @@
  * translation unit without pulling in unnecessary dependencies.
  */
 
+/* Loader/package identity only. The kernel module intentionally has no
+ * MODULE_VERSION (matching enenkernel); this string never becomes modinfo. */
 #define DFM_MODULE_VERSION "2.0"
 
 enum dfm_stage_mode {

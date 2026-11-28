@@ -25,6 +25,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
 #include <sys/system_properties.h>
 #include <sys/utsname.h>
@@ -66,6 +67,11 @@
 #endif
 
 static constexpr long kO_NONBLOCK = 0x800;
+static constexpr unsigned long kDfmInstallMagic1 = 0x44464D50UL;
+static constexpr unsigned long kDfmInstallMagic2 = 0x504D4644UL;
+static constexpr unsigned long kDfmModuleIocExposeUnload = _IO('D', 47);
+static constexpr const char* kDfmPrepareUnloadPath =
+    "/sys/module/dfm/parameters/prepare_unload";
 static constexpr const char* kVersion = DFM_EMBEDDED_MODULE_VERSION;
 static constexpr const char* kVersionFull = DFM_EMBEDDED_MODULE_VERSION;
 static constexpr const char* kTgUrl = "https://t.me/BAIFRE";
@@ -882,6 +888,98 @@ static bool is_module_loaded() {
     return proc_module_present("dfm");
 }
 
+static bool write_text_file(const char* path, const char* text) {
+    const int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    const ssize_t written = write(fd, text, std::strlen(text));
+    const int saved = errno;
+    close(fd);
+    errno = saved;
+    return written == ssize_t(std::strlen(text));
+}
+
+/* The module pins itself and detaches its sysfs kobject for safe unloading.
+ * Ask it to restore the loader controls, then close the last driver handle and
+ * let prepare_unload drain the hooks before delete_module can succeed. */
+static int open_install_fd() {
+    auto try_nr = [](long nr) -> int {
+        int fd = -1;
+        const long result = syscall(nr, kDfmInstallMagic1, kDfmInstallMagic2,
+                                    0UL, &fd);
+        if (result == 0 && fd >= 0)
+            return fd;
+        return -1;
+    };
+    for (long nr : {18L, 38L, 42L, 163L, 164L}) {
+        const int fd = try_nr(nr);
+        if (fd >= 0)
+            return fd;
+    }
+    for (long nr = 244; nr <= 259; ++nr) {
+        const int fd = try_nr(nr);
+        if (fd >= 0)
+            return fd;
+    }
+    for (long nr = 295; nr <= 423; ++nr) {
+        const int fd = try_nr(nr);
+        if (fd >= 0)
+            return fd;
+    }
+    return -1;
+}
+
+static bool prepare_module_for_unload() {
+    const int fd = open_install_fd();
+    if (fd < 0)
+        return false;
+    const int exposed = ioctl(fd, kDfmModuleIocExposeUnload, 0);
+    close(fd);
+    if (exposed != 0)
+        return false;
+    for (int i = 0; i < 50; ++i) {
+        if (access(kDfmPrepareUnloadPath, F_OK) == 0)
+            break;
+        usleep(20000);
+    }
+    return write_text_file(kDfmPrepareUnloadPath, "1");
+}
+
+static bool unload_loaded_module() {
+    if (!is_module_loaded())
+        return true;
+    if (syscall(__NR_delete_module, "dfm", kO_NONBLOCK) == 0) {
+        for (int i = 0; i < 20 && is_module_loaded(); ++i)
+            usleep(100000);
+        if (!is_module_loaded())
+            return true;
+        errno = EBUSY;
+        return false;
+    }
+    const int first_error = errno;
+    if (first_error == ENOENT)
+        return !is_module_loaded();
+    if (!prepare_module_for_unload()) {
+        errno = first_error;
+        return false;
+    }
+    if (syscall(__NR_delete_module, "dfm", kO_NONBLOCK) != 0) {
+        for (int i = 0; i < 20 && is_module_loaded(); ++i)
+            usleep(100000);
+        if (!is_module_loaded())
+            return true;
+        if (errno == ENOENT)
+            errno = first_error;
+        return false;
+    }
+    for (int i = 0; i < 20 && is_module_loaded(); ++i)
+        usleep(100000);
+    if (!is_module_loaded())
+        return true;
+    errno = EBUSY;
+    return false;
+}
+
 /* Versions before the rename loaded a module named "bs". Two copies would
  * install the same kprobes/text hooks, so refuse to stack them. */
 static bool legacy_module_loaded() {
@@ -1208,20 +1306,9 @@ static int load_kmi(const char* kmi, const std::string& params,
             return kExitFailure;
         }
     }
-    if (is_module_loaded()) {
-        /* A previously loaded build must not be mistaken for the module
-         * embedded in this loader. Replace it silently; the module hides its
-         * sysfs kobject, so /proc/modules is the only identity check. */
-        if (syscall(__NR_delete_module, "dfm", kO_NONBLOCK) != 0) {
-            err("旧模块卸载失败，请重启设备后再加载");
-            return kExitFailure;
-        }
-        for (int i = 0; i < 20 && is_module_loaded(); i++)
-            usleep(100000);
-        if (is_module_loaded()) {
-            err("旧模块仍在内核中，请重启设备后再加载");
-            return kExitFailure;
-        }
+    if (is_module_loaded() && !unload_loaded_module()) {
+        err("旧模块卸载失败，请重启设备后再加载");
+        return kExitFailure;
     }
 
     std::vector<unsigned char> ko;
@@ -1257,27 +1344,22 @@ static int load_kmi(const char* kmi, const std::string& params,
 
 static int unload_module() {
     info("正在卸载内核模块...");
-    const long result = syscall(__NR_delete_module, "dfm", kO_NONBLOCK);
-    if (result != 0) {
-        const int error = errno;
-        if (error == ENOENT) {
-            if (unload_legacy_modules()) {
-                ok("旧版模块已卸载");
-                return kExitOk;
-            }
-            err("内核模块未加载");
-            return kExitFailure;
+    if (!is_module_loaded()) {
+        if (unload_legacy_modules()) {
+            ok("旧版模块已卸载");
+            return kExitOk;
         }
+        err("内核模块未加载");
+        return kExitFailure;
+    }
+    if (!unload_loaded_module()) {
+        const int error = errno;
         std::printf("%s[x] 卸载失败%s %s (%d)\n", kRed, kReset,
                     errno_name(error), error);
         if (error == EBUSY)
             err("提示: 仍有进程持有控制 fd 或 hwb 待还原；关闭相关进程/执行 CLEAR 后重试，或重启设备");
         else if (error == EPERM)
             err("提示: 需要 root 权限执行卸载");
-        return kExitFailure;
-    }
-    if (is_module_loaded()) {
-        err("卸载命令返回成功，但模块仍在 /proc/modules 中");
         return kExitFailure;
     }
     ok("内核模块已卸载");
@@ -1425,8 +1507,6 @@ static void usage(std::FILE* stream, const char* program) {
         "  %s --auto              自动按当前内核选择最接近的方案并加载\n"
         "  %s --list              列出内置的驱动模块\n"
         "  %s --kmi NAME          直接加载指定 KMI（如 android15-6.6）\n"
-        "  %s --stage N           分阶段诊断（0=完整 1=仅兼容层 2=+内存 3=+文件 4=+hooks）\n"
-
         "  %s --unload            卸载已加载的模块\n"
         "  %s --help              显示本帮助\n"
         "\n"
@@ -1435,8 +1515,7 @@ static void usage(std::FILE* stream, const char* program) {
         "需要 root 权限；本程序是 ELF 可执行文件，直接运行（不要用 sh）。\n"
         "例如: su -c /data/local/tmp/NFLoaderDriver.sh --auto\n"
         "退出码: 0 成功, 1 加载失败, 2 用法错误, 3 非 root\n",
-        kVersion, program, program, program, program, program, program,
-        program);
+        kVersion, program, program, program, program, program, program);
 }
 
 static int require_root() {
@@ -1451,7 +1530,6 @@ int main(int argc, char** argv) {
     bool list_only = false;
     bool unload = false;
 
-    std::string stage;
     std::string kmi;
 
     for (int i = 1; i < argc; ++i) {
@@ -1483,25 +1561,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-
-        if (std::strcmp(argument, "--stage") == 0) {
-            if (i + 1 >= argc) {
-                err("--stage 需要指定阶段（0-4）");
-                return kExitUsage;
-            }
-            stage = argv[++i];
-            {
-                char* stage_end = nullptr;
-                const long stage_value =
-                    std::strtol(stage.c_str(), &stage_end, 10);
-                if (stage_end == stage.c_str() || *stage_end != '\0' ||
-                    stage_value < 0 || stage_value > 4) {
-                    err("--stage 需要 0-4 之间的数字");
-                    return kExitUsage;
-                }
-            }
-            continue;
-        }
         if (std::strcmp(argument, "--kmi") == 0) {
             if (i + 1 >= argc) {
                 err("--kmi 需要指定名称");
@@ -1517,7 +1576,7 @@ int main(int argc, char** argv) {
 
     if (!kmi.empty() && (auto_mode || list_only))
         auto_mode = false;
-    if (unload && (!kmi.empty() || !stage.empty() || auto_mode)) {
+    if (unload && (!kmi.empty() || auto_mode)) {
         err("--unload 不能与加载参数同时使用");
         return kExitUsage;
     }
@@ -1535,9 +1594,6 @@ int main(int argc, char** argv) {
         return unload_module();
 
     std::string params;
-    if (!stage.empty()) {
-        params = "dfm_stage=" + stage;
-    }
 
 
     std::string release;

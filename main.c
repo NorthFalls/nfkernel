@@ -576,8 +576,6 @@ static int __init mod_init(void)
         pr_warn("module sysfs detach unavailable: %d\n", ret);
     set_install_admission(true);
 
-    pr_info("module loaded, syscall_nr=%d reboot_fallback=%d\n",
-            syscall_hook_nr(), g_reboot_kprobe_registered);
     return 0;
 }
 
@@ -594,7 +592,6 @@ static void __exit mod_exit(void)
     touch_v2_exit();
     dfm_file_io_exit();
     mem_core_exit();
-    pr_info("module unloaded\n");
 }
 
 module_init(mod_init);

@@ -134,7 +134,6 @@ int dfm_sf_avc_init(void)
         return ret;
     }
     WRITE_ONCE(sf_registered, true);
-    pr_info("avc_denied enabled for source %s (sid=%u)\n", sf_context, sid);
     return 0;
 }
 

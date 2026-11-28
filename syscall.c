@@ -298,7 +298,6 @@ int syscall_hook_init(void)
 
         g_orig_syscall = ni_syscall;
         g_hooked_nr = i;
-        pr_info("syscall install hook registered at nr %d\n", g_hooked_nr);
         return 0;
     }
 
@@ -318,7 +317,6 @@ int syscall_hook_exit(void)
         return ret;
     syscall_drain_hook(&g_install_srcu);
     cleanup_srcu_struct(&g_install_srcu);
-    pr_info("syscall install hook restored nr %d\n", g_hooked_nr);
     g_hooked_nr = -1;
     g_orig_syscall = NULL;
     return 0;

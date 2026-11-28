@@ -611,7 +611,7 @@ static int touch_try_patch_file(struct file *file)
     spin_unlock_irqrestore(&g_touch_binding_lock, flags);
 
     schedule_work(&g_touch_stop_read_work);
-    pr_info("touch proxy installed on %s for %s (absX=[%d,%d] absY=[%d,%d])\n",
+    pr_debug("touch proxy installed on %s for %s (absX=[%d,%d] absY=[%d,%d])\n",
             path, current->comm,
             g_touch_status.abs_x_min, g_touch_status.abs_x_max,
             g_touch_status.abs_y_min, g_touch_status.abs_y_max);
