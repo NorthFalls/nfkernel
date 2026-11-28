@@ -40,7 +40,7 @@
 #include "file_observer.h"
 #include "compat.h"
 #include "module_sysfs.h"
-#include "gyro_ctl.h"
+#include "nfk_gyro.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("DFM");
@@ -94,6 +94,8 @@ static long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     void __user *argp = (void __user *)arg;
 
     switch (cmd) {
+    case NFK_GYRO_IOC_CTRL:
+        return nfk_gyro_ioctl(argp);
     case MEM_IOC_CAPABILITIES:
         return dfm_capabilities(argp);
     case DFM_FILE_OBSERVER_IOC_OPEN:
