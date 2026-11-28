@@ -49,6 +49,8 @@ void (*dfm___sync_icache_dcache)(pte_t pte);
 void (*dfm___set_fixmap)(enum fixed_addresses idx, phys_addr_t phys,
 			 pgprot_t prot);
 long (*dfm_copy_to_kernel_nofault)(void *dst, const void *src, size_t size);
+long (*dfm_copy_from_user_nofault)(void *dst, const void __user *src, size_t size);
+long (*dfm_copy_to_user_nofault)(void __user *dst, const void *src, size_t size);
 void (*dfm_dcache_clean_inval_poc)(unsigned long start, unsigned long end);
 int (*dfm_set_security_override_from_ctx)(struct cred *cred, const char *secctx);
 struct file *(*dfm_get_task_exe_file)(struct task_struct *task);
@@ -161,6 +163,12 @@ int dfm_compat_init(void)
 	dfm_sock_from_file = (void *)dfm_kallsyms_lookup_name("sock_from_file");
 	/* Optional: absent on several vendor kernels; futex.c guards NULL. */
 	dfm_get_wchan = (void *)dfm_kallsyms_lookup_name("get_wchan");
+	/* Optional user-copy nofault helpers; gyro control fails EOPNOTSUPP
+	 * if a vendor kernel does not expose them. */
+	dfm_copy_from_user_nofault =
+		(void *)dfm_kallsyms_lookup_name("copy_from_user_nofault");
+	dfm_copy_to_user_nofault =
+		(void *)dfm_kallsyms_lookup_name("copy_to_user_nofault");
 	/* Optional: 6.18 GKI no longer exports these; file I/O disables itself. */
 	dfm_override_creds =
 		(void *)dfm_kallsyms_lookup_name("override_creds");

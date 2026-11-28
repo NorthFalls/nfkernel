@@ -52,6 +52,10 @@ extern void (*dfm___set_fixmap)(enum fixed_addresses idx, phys_addr_t phys,
 			       pgprot_t prot);
 extern long (*dfm_copy_to_kernel_nofault)(void *dst, const void *src,
 					 size_t size);
+extern long (*dfm_copy_from_user_nofault)(void *dst,
+					      const void __user *src, size_t size);
+extern long (*dfm_copy_to_user_nofault)(void __user *dst,
+					    const void *src, size_t size);
 extern void (*dfm_dcache_clean_inval_poc)(unsigned long start,
 					 unsigned long end);
 extern int (*dfm_set_security_override_from_ctx)(struct cred *cred,

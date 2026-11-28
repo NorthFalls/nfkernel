@@ -20,6 +20,7 @@
 #include <asm/ptrace.h>
 
 #include "dfm_gyro.h"
+#include "compat.h"
 
 #define DFM_GYRO_EVENT_SIZE	0x68u
 #define DFM_GYRO_TYPE_HAL	0x08u
@@ -28,6 +29,23 @@
 #define DFM_GYRO_TYPE_UNCAL	16
 #define DFM_GYRO_IOV_MAX	16u
 #define DFM_GYRO_MAXACTIVE	256
+
+/* nofault helpers are not exported by all GKI kernels; resolve via compat. */
+static long dfm_gyro_copy_from_user(void *dst, const void __user *src,
+				    size_t size)
+{
+	if (!dfm_copy_from_user_nofault)
+		return -EOPNOTSUPP;
+	return dfm_copy_from_user_nofault(dst, src, size);
+}
+
+static long dfm_gyro_copy_to_user(void __user *dst, const void *src,
+				  size_t size)
+{
+	if (!dfm_copy_to_user_nofault)
+		return -EOPNOTSUPP;
+	return dfm_copy_to_user_nofault(dst, src, size);
+}
 
 /* TEMPORARY diagnostic logging: set to 0 (and rebuild) to restore silence. */
 #define DFM_GYRO_DIAG_LOG	0
@@ -82,7 +100,7 @@ static int dfm_gyro_read32(struct iovec *iov, unsigned int n,
 		if (len > ULONG_MAX - base)
 			return -EFAULT;
 		if (off < base + len) {
-			if (copy_from_user_nofault(&val,
+			if (dfm_gyro_copy_from_user(&val,
 					(u32 __user *)((char __user *)iov[i].iov_base +
 						       (off - base)), sizeof(val)))
 				return -EFAULT;
@@ -106,7 +124,7 @@ static int dfm_gyro_write32(struct iovec *iov, unsigned int n,
 		if (len > ULONG_MAX - base)
 			return -EFAULT;
 		if (off < base + len)
-			return copy_to_user_nofault(
+			return dfm_gyro_copy_to_user(
 				(u32 __user *)((char __user *)iov[i].iov_base +
 					       (off - base)), &val, sizeof(val));
 		base += len;
@@ -191,7 +209,7 @@ static int dfm_gyro_entry(struct kretprobe_instance *ri, struct pt_regs *regs,
 		return 0;
 	}
 
-	if (copy_from_user_nofault(&umh, (void __user *)ur->regs[1], sizeof(umh)))
+	if (dfm_gyro_copy_from_user(&umh, (void __user *)ur->regs[1], sizeof(umh)))
 		return 1;
 	if (!umh.msg_iov || !umh.msg_iovlen || umh.msg_iovlen > DFM_GYRO_IOV_MAX)
 		return 1;
@@ -245,7 +263,7 @@ static int dfm_gyro_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	if (!ctx->iovlen || ctx->iovlen > DFM_GYRO_IOV_MAX)
 		return 0;
-	if (copy_from_user_nofault(iov, ctx->iov,
+	if (dfm_gyro_copy_from_user(iov, ctx->iov,
 				   ctx->iovlen * sizeof(struct iovec)))
 		return 0;
 
