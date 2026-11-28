@@ -203,12 +203,22 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 	unsigned int nr = 0;
 	unsigned int i;
 	unsigned long bytes;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	struct vma_iterator vmi;
+#endif
 
 	mm = get_task_mm(task);
 	if (!mm)
 		return -ESRCH;
 	mmap_read_lock(mm);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	vma_iter_init(&vmi, mm, 0);
+	for_each_vma(vmi, vma) {
+		if (nr >= ARRAY_SIZE(ranges))
+			break;
+#else
 	for (vma = mm->mmap; vma && nr < ARRAY_SIZE(ranges); vma = vma->vm_next) {
+#endif
 		/* The app may map the direct report read-only; HAL owns the
 		 * writable side.  Include read-only shared mappings and use
 		 * FOLL_FORCE for the rewrite. */
