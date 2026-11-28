@@ -105,6 +105,7 @@ static struct delayed_work dfm_gyro_direct_work;
 static atomic64_t dfm_gyro_direct_writes = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_direct_events = ATOMIC64_INIT(0);
 static unsigned int dfm_gyro_direct_fail_streak;
+static unsigned int dfm_gyro_direct_idle_scans;
 static u64 dfm_gyro_direct_last_ts;
 
 static void dfm_gyro_direct_work_fn(struct work_struct *work);
@@ -262,10 +263,23 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 			return 0;
 		}
 	}
-	/* Do not fall back to an unrelated mapping.  Scanning it every few
-	 * milliseconds would waste CPU and could rewrite data that merely
-	 * looks like a sensor event.  The caller can retry once the game has
-	 * started and the direct queue contains a real gyro event. */
+	/* No gyro event yet: the game may still be creating the direct
+	 * channel.  Attach to one candidate mapping and let the worker look
+	 * for a real gyro record; the worker only writes records that pass
+	 * the full version/sensor/type/timestamp check, and gives up after a
+	 * short idle period if this is just an unrelated ashmem buffer. */
+	if (nr) {
+		for (i = 0; i < nr; i++) {
+			if (ranges[i].writable) {
+				*start = ranges[i].start;
+				*len = ranges[i].len;
+				return 0;
+			}
+		}
+		*start = ranges[0].start;
+		*len = ranges[0].len;
+		return 0;
+	}
 	return -ENOENT;
 }
 
@@ -337,6 +351,12 @@ static void dfm_gyro_direct_work_fn(struct work_struct *work)
 				WRITE_ONCE(dfm_gyro_direct_active, false);
 		} else {
 			dfm_gyro_direct_fail_streak = 0;
+			if (events) {
+				dfm_gyro_direct_idle_scans = 0;
+			} else if (++dfm_gyro_direct_idle_scans >= 128) {
+				/* Candidate mapping was unrelated; stop scanning. */
+				WRITE_ONCE(dfm_gyro_direct_active, false);
+			}
 		}
 	}
 	if (READ_ONCE(dfm_gyro_direct_active))
@@ -360,6 +380,7 @@ static void dfm_gyro_direct_stop(void)
 	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
 	dfm_gyro_direct_fail_streak = 0;
+	dfm_gyro_direct_idle_scans = 0;
 	dfm_gyro_direct_last_ts = 0;
 }
 
@@ -400,6 +421,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 	dfm_gyro_direct_len = len;
 	dfm_gyro_direct_buf = buf;
 	dfm_gyro_direct_fail_streak = 0;
+	dfm_gyro_direct_idle_scans = 0;
 	dfm_gyro_direct_last_ts = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, true);
 	schedule_delayed_work(&dfm_gyro_direct_work,
@@ -691,6 +713,8 @@ int dfm_gyro_init(void)
 	dfm_gyro_direct_buf = NULL;
 	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
+	dfm_gyro_direct_fail_streak = 0;
+	dfm_gyro_direct_idle_scans = 0;
 	dfm_gyro_direct_last_ts = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, false);
 	atomic64_set(&dfm_gyro_direct_events, 0);
