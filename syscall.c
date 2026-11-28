@@ -52,7 +52,9 @@ typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
 
 static syscall_fn_t *g_sys_call_table;
 static syscall_fn_t g_orig_syscall;
+static syscall_fn_t g_orig_reboot_syscall;
 static int g_hooked_nr = -1;
+static int g_reboot_hooked;
 static struct srcu_struct g_install_srcu;
 
 static void *__nocfi syscall_lookup_symbol(const char *symbol_name)
@@ -255,6 +257,65 @@ out:
     return ret;
 }
 
+/* enenkernel clients fall back to syscall(__NR_reboot, MAGIC1, MAGIC2, 0,
+ * &fd) after scanning unused syscalls. A kprobe cannot stop the original
+ * reboot, so hook the real reboot slot too: magic requests install the control
+ * fd, every other call is forwarded to the original reboot syscall. */
+static asmlinkage long __nocfi syscall_reboot_chain(const struct pt_regs *regs)
+{
+    int magic1;
+    int magic2;
+    int __user *outp;
+
+    if (!regs || current_uid().val > 1000)
+        goto chain;
+
+    magic1 = (int)regs->regs[0];
+    magic2 = (int)regs->regs[1];
+    if (magic1 != INSTALL_MAGIC1 || magic2 != INSTALL_MAGIC2)
+        goto chain;
+
+    outp = (int __user *)(unsigned long)regs->regs[3];
+    if (!try_module_get(THIS_MODULE))
+        goto chain;
+    {
+        long ret = install_fd_to_user(outp);
+        module_put(THIS_MODULE);
+        return ret;
+    }
+
+chain:
+    if (g_orig_reboot_syscall)
+        return g_orig_reboot_syscall(regs);
+    return -ENOSYS;
+}
+
+static int syscall_hook_reboot(void)
+{
+    syscall_fn_t cur;
+    syscall_fn_t replacement = syscall_reboot_chain;
+    int ret;
+
+    if (!g_sys_call_table || __NR_reboot >= __NR_syscalls)
+        return -EINVAL;
+
+    cur = READ_ONCE(g_sys_call_table[__NR_reboot]);
+    if (cur == syscall_reboot_chain)
+        return 0;
+
+    g_orig_reboot_syscall = cur;
+    ret = syscall_patch_text_expected(&g_sys_call_table[__NR_reboot],
+                                      &replacement, &cur,
+                                      sizeof(replacement));
+    if (ret) {
+        g_orig_reboot_syscall = NULL;
+        return ret;
+    }
+
+    g_reboot_hooked = 1;
+    return 0;
+}
+
 static syscall_fn_t syscall_lookup_ni(void)
 {
     syscall_fn_t ni;
@@ -286,6 +347,12 @@ int syscall_hook_init(void)
     if (!dfm_dcache_clean_inval_poc && !dfm___flush_dcache_area)
         return -ENOENT;
 #endif
+    /* SRCU is all-or-nothing: the install handler runs under srcu_read_lock
+     * and the exit path calls synchronize_srcu/cleanup_srcu_struct. Calling
+     * a NULL pointer here would panic during finit_module. */
+    if (!dfm_init_srcu_struct || !dfm_cleanup_srcu_struct ||
+        !dfm_synchronize_srcu)
+        return -ENOENT;
 
     g_sys_call_table = (syscall_fn_t *)syscall_lookup_symbol("sys_call_table");
     if (!g_sys_call_table)
@@ -311,6 +378,22 @@ int syscall_hook_init(void)
 
         g_orig_syscall = ni_syscall;
         g_hooked_nr = i;
+
+        ret = syscall_hook_reboot();
+        if (ret) {
+            /* Without the reboot-slot chain an enenkernel fallback probe can
+             * still power-cycle the device. Fail the load instead of
+             * reporting a hook that is not safe. */
+            if (syscall_restore_hook(&g_sys_call_table[i], g_orig_syscall,
+                                     syscall_install_handler))
+                return ret;
+            g_hooked_nr = -1;
+            g_orig_syscall = NULL;
+            syscall_drain_hook(&g_install_srcu);
+            cleanup_srcu_struct(&g_install_srcu);
+            return ret;
+        }
+
         return 0;
     }
 
@@ -324,6 +407,15 @@ int syscall_hook_exit(void)
 
     if (g_hooked_nr < 0)
         return 0;
+    if (g_reboot_hooked && g_orig_reboot_syscall) {
+        ret = syscall_restore_hook(&g_sys_call_table[__NR_reboot],
+                                   g_orig_reboot_syscall,
+                                   syscall_reboot_chain);
+        if (ret)
+            return ret;
+        g_reboot_hooked = 0;
+        g_orig_reboot_syscall = NULL;
+    }
     ret = syscall_restore_hook(&g_sys_call_table[g_hooked_nr], g_orig_syscall,
                                syscall_install_handler);
     if (ret)
