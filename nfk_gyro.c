@@ -48,7 +48,6 @@ static atomic64_t nfk_gyro_processed = ATOMIC64_INIT(0);
 static atomic64_t nfk_gyro_rewritten = ATOMIC64_INIT(0);
 
 static struct kretprobe nfk_gyro_probes[3];
-static unsigned int nfk_gyro_probe_count;
 
 static int nfk_gyro_entry_0(struct kretprobe_instance *ri, struct pt_regs *regs);
 static int nfk_gyro_entry_1(struct kretprobe_instance *ri, struct pt_regs *regs);
@@ -66,19 +65,28 @@ static const struct nfk_gyro_candidate nfk_gyro_candidates[] = {
 	{ "__arm64_sys_read",     true,  nfk_gyro_entry_2 },
 };
 
+static bool nfk_gyro_probe_live[ARRAY_SIZE(nfk_gyro_candidates)];
+
 static int nfk_gyro_read32(struct iovec *iov, unsigned int n,
 			   unsigned long off, u32 *out)
 {
 	unsigned int i;
 	unsigned long base = 0;
+	u32 val;
 
 	for (i = 0; i < n; i++) {
 		unsigned long len = iov[i].iov_len;
 
-		if (off < base + len)
-			return get_user(*out,
+		if (len > ULONG_MAX - base)
+			return -EFAULT;
+		if (off < base + len) {
+			if (copy_from_user_nofault(&val,
 					(u32 __user *)((char __user *)iov[i].iov_base +
-						       (off - base)));
+						       (off - base)), sizeof(val)))
+				return -EFAULT;
+			*out = val;
+			return 0;
+		}
 		base += len;
 	}
 	return -EFAULT;
@@ -93,10 +101,12 @@ static int nfk_gyro_write32(struct iovec *iov, unsigned int n,
 	for (i = 0; i < n; i++) {
 		unsigned long len = iov[i].iov_len;
 
+		if (len > ULONG_MAX - base)
+			return -EFAULT;
 		if (off < base + len)
-			return put_user(val,
-					(u32 __user *)((char __user *)iov[i].iov_base +
-						       (off - base)));
+			return copy_to_user_nofault(
+				(u32 __user *)((char __user *)iov[i].iov_base +
+					       (off - base)), &val, sizeof(val));
 		base += len;
 	}
 	return -EFAULT;
@@ -109,13 +119,17 @@ static void nfk_gyro_rewrite(struct iovec *iov, unsigned int n,
 
 	for (off = 0; off + NFK_GYRO_EVENT_SIZE <= total;
 	     off += NFK_GYRO_EVENT_SIZE) {
-		u32 type, x, y;
+		u32 type = 0, x, y;
+		bool found = false;
 
-		if (nfk_gyro_read32(iov, n, off + NFK_GYRO_TYPE_HAL, &type)) {
-			if (nfk_gyro_read32(iov, n, off + NFK_GYRO_TYPE_NDK, &type))
-				continue;
-		}
-		if (type != NFK_GYRO_TYPE_CAL && type != NFK_GYRO_TYPE_UNCAL)
+		if (!nfk_gyro_read32(iov, n, off + NFK_GYRO_TYPE_HAL, &type) &&
+		    (type == NFK_GYRO_TYPE_CAL || type == NFK_GYRO_TYPE_UNCAL))
+			found = true;
+		if (!found &&
+		    !nfk_gyro_read32(iov, n, off + NFK_GYRO_TYPE_NDK, &type) &&
+		    (type == NFK_GYRO_TYPE_CAL || type == NFK_GYRO_TYPE_UNCAL))
+			found = true;
+		if (!found)
 			continue;
 
 		atomic64_inc(&nfk_gyro_processed);
@@ -168,7 +182,7 @@ static int nfk_gyro_entry(struct kretprobe_instance *ri, struct pt_regs *regs,
 		return 0;
 	}
 
-	if (copy_from_user(&umh, (void __user *)ur->regs[1], sizeof(umh)))
+	if (copy_from_user_nofault(&umh, (void __user *)ur->regs[1], sizeof(umh)))
 		return 1;
 	if (!umh.msg_iov || !umh.msg_iovlen || umh.msg_iovlen > NFK_GYRO_IOV_MAX)
 		return 1;
@@ -222,8 +236,8 @@ static int nfk_gyro_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	if (!ctx->iovlen || ctx->iovlen > NFK_GYRO_IOV_MAX)
 		return 0;
-	if (copy_from_user(iov, ctx->iov,
-			   ctx->iovlen * sizeof(struct iovec)))
+	if (copy_from_user_nofault(iov, ctx->iov,
+				   ctx->iovlen * sizeof(struct iovec)))
 		return 0;
 
 	nfk_gyro_rewrite(iov, ctx->iovlen, total);
@@ -234,15 +248,19 @@ static void nfk_gyro_unregister_locked(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < nfk_gyro_probe_count; i++)
-		unregister_kretprobe(&nfk_gyro_probes[i]);
-	nfk_gyro_probe_count = 0;
+	for (i = 0; i < ARRAY_SIZE(nfk_gyro_probes); i++) {
+		if (nfk_gyro_probe_live[i]) {
+			unregister_kretprobe(&nfk_gyro_probes[i]);
+			nfk_gyro_probe_live[i] = false;
+		}
+	}
 	WRITE_ONCE(nfk_gyro_registered, false);
 }
 
 static int nfk_gyro_register_locked(void)
 {
 	unsigned int i;
+	unsigned int live = 0;
 	int ret;
 
 	if (READ_ONCE(nfk_gyro_registered))
@@ -251,6 +269,7 @@ static int nfk_gyro_register_locked(void)
 	for (i = 0; i < ARRAY_SIZE(nfk_gyro_candidates); i++) {
 		struct kretprobe *probe = &nfk_gyro_probes[i];
 
+		nfk_gyro_probe_live[i] = false;
 		memset(probe, 0, sizeof(*probe));
 		probe->kp.symbol_name = nfk_gyro_candidates[i].name;
 		probe->entry_handler = nfk_gyro_candidates[i].entry;
@@ -259,15 +278,13 @@ static int nfk_gyro_register_locked(void)
 		probe->data_size = sizeof(struct nfk_gyro_ctx);
 
 		ret = register_kretprobe(probe);
-		if (ret) {
-			pr_debug("nfk_gyro: %s unavailable: %d\n",
-				 nfk_gyro_candidates[i].name, ret);
+		if (ret)
 			continue;
-		}
-		nfk_gyro_probe_count++;
+		nfk_gyro_probe_live[i] = true;
+		live++;
 	}
 
-	if (!nfk_gyro_probe_count)
+	if (!live)
 		return -ENOENT;
 	WRITE_ONCE(nfk_gyro_registered, true);
 	return 0;
@@ -279,7 +296,7 @@ int nfk_gyro_init(void)
 	nfk_gyro_registered = false;
 	nfk_gyro_enabled = false;
 	nfk_gyro_tgid = 0;
-	nfk_gyro_probe_count = 0;
+	memset(nfk_gyro_probe_live, 0, sizeof(nfk_gyro_probe_live));
 	return 0;
 }
 
@@ -320,6 +337,10 @@ long nfk_gyro_ioctl(void __user *arg)
 			WRITE_ONCE(nfk_gyro_enabled, false);
 		break;
 	case NFK_GYRO_CMD_ENABLE:
+		if (READ_ONCE(nfk_gyro_tgid) <= 0) {
+			ret = -EINVAL;
+			break;
+		}
 		WRITE_ONCE(nfk_gyro_enabled, true);
 		ret = nfk_gyro_register_locked();
 		if (ret)
