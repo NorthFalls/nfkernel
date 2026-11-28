@@ -62,6 +62,7 @@ extern int (*dfm_groups_search)(const struct group_info *group_info, kgid_t grp)
 extern void (*dfm_groups_sort)(struct group_info *group_info);
 extern int (*dfm_set_current_groups)(struct group_info *group_info);
 extern struct mm_struct *dfm_init_mm;
+extern unsigned long (*dfm_get_wchan)(struct task_struct *p);
 /* pid identity/session helpers (Android GKI does not export all of them). */
 extern struct pid *(*dfm_get_pid)(struct pid *pid);
 extern void (*dfm_put_pid)(struct pid *pid);
@@ -115,6 +116,7 @@ extern unsigned int dfm_compat_missing;
 #define put_pid (*dfm_put_pid)
 #define find_vpid (*dfm_find_vpid)
 #define pid_task (*dfm_pid_task)
+#define get_wchan (*dfm_get_wchan)
 #define init_srcu_struct (*dfm_init_srcu_struct)
 #define cleanup_srcu_struct (*dfm_cleanup_srcu_struct)
 #define synchronize_srcu (*dfm_synchronize_srcu)

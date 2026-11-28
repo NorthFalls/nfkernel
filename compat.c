@@ -61,6 +61,7 @@ struct pid *(*dfm_get_pid)(struct pid *pid);
 void (*dfm_put_pid)(struct pid *pid);
 struct pid *(*dfm_find_vpid)(int nr);
 struct task_struct *(*dfm_pid_task)(struct pid *pid, enum pid_type type);
+unsigned long (*dfm_get_wchan)(struct task_struct *p);
 void (*dfm_synchronize_rcu_tasks)(void);
 void (*dfm___flush_dcache_area)(void *, size_t);
 struct file *(*dfm_fget_task)(struct task_struct *, unsigned int);
@@ -109,6 +110,7 @@ static const struct dfm_compat_symbol dfm_compat_symbols[] = {
 	{ "put_pid", (void **)&dfm_put_pid },
 	{ "find_vpid", (void **)&dfm_find_vpid },
 	{ "pid_task", (void **)&dfm_pid_task },
+	{ "get_wchan", (void **)&dfm_get_wchan },
 };
 
 unsigned int dfm_compat_missing;

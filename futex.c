@@ -216,6 +216,7 @@ static int sample_waiter(struct futex_context *context,struct task_struct *task,
        !wait_matches(args,address,bitset))goto out;
     before=wait_inactive(task,state);
     if(!before){result=-EAGAIN;goto out;}
+    if(!dfm_get_wchan)goto out;
     wchan=get_wchan(task);
     if(wchan<futex_sleep_start||wchan-futex_sleep_start>=futex_sleep_size)
         goto out;
