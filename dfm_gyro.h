@@ -29,6 +29,9 @@ struct dfm_gyro_req {
 	__u32 reserved[3];
 	__u32 samples[8][3];	/* first 12 bytes, up to 8 candidate buffers */
 	__u32 sample_count;
+	__u32 direct_events;	/* SensorDirectChannel gyro events seen */
+	__u32 direct_writes;	/* direct-channel x/y writes completed */
+	__u64 direct_addr;	/* discovered ashmem queue start, 0=none */
 };
 
 #define DFM_GYRO_IOC_CTRL _IOWR(DFM_GYRO_IOC_TYPE, 48, struct dfm_gyro_req)

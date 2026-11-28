@@ -17,6 +17,14 @@
 #include <linux/atomic.h>
 #include <linux/capability.h>
 #include <linux/version.h>
+#include <linux/mm.h>
+#include <linux/sched/mm.h>
+#include <linux/slab.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
+#include <linux/string.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
 #include <asm/ptrace.h>
 
 #include "dfm_gyro.h"
@@ -70,6 +78,34 @@ static atomic64_t dfm_gyro_entries = ATOMIC64_INIT(0);
 static u32 dfm_gyro_samples[8][3];
 static u32 dfm_gyro_sample_count;
 
+/*
+ * Delta Force and several Tencent FPS builds use SensorDirectChannel: the HAL
+ * writes sensors_event_t records straight into an ashmem mapping of the game
+ * process, bypassing read/recvmsg.  The kretprobe path above cannot see that
+ * traffic.  Direct mode finds the ashmem queue and rewrites +0x18/+0x1c in
+ * every gyroscope record.  It only starts when the private D48 ioctl enables
+ * it, so module load is unaffected.
+ */
+#define DFM_GYRO_DIRECT_MAX_RANGES	8
+#define DFM_GYRO_DIRECT_MAX_BYTES	(256u * 1024u)
+#define DFM_GYRO_DIRECT_INTERVAL_MS	8
+
+struct dfm_gyro_direct_range {
+	unsigned long start;
+	unsigned long len;
+};
+
+static struct task_struct *dfm_gyro_direct_task;
+static unsigned long dfm_gyro_direct_start;
+static unsigned long dfm_gyro_direct_len;
+static void *dfm_gyro_direct_buf;
+static bool dfm_gyro_direct_active;
+static struct delayed_work dfm_gyro_direct_work;
+static atomic64_t dfm_gyro_direct_writes = ATOMIC64_INIT(0);
+static atomic64_t dfm_gyro_direct_events = ATOMIC64_INIT(0);
+
+static void dfm_gyro_direct_work_fn(struct work_struct *work);
+
 static struct kretprobe dfm_gyro_probes[3];
 
 static int dfm_gyro_entry_0(struct kretprobe_instance *ri, struct pt_regs *regs);
@@ -89,6 +125,237 @@ static const struct dfm_gyro_candidate dfm_gyro_candidates[] = {
 };
 
 static bool dfm_gyro_probe_live[ARRAY_SIZE(dfm_gyro_candidates)];
+
+static bool dfm_gyro_direct_path(struct vm_area_struct *vma)
+{
+	const char *name;
+
+	if (!vma->vm_file)
+		return false;
+	name = vma->vm_file->f_path.dentry->d_name.name;
+	if (!name)
+		return false;
+	return strstr(name, "ashmem") || strstr(name, "memfd") ||
+	       strstr(name, "dmabuf") || strstr(name, "gralloc") ||
+	       strstr(name, "dma_heap");
+}
+
+static struct task_struct *dfm_gyro_direct_get_task(pid_t tgid)
+{
+	struct task_struct *task;
+	struct pid *pid;
+
+	rcu_read_lock();
+	pid = find_vpid(tgid);
+	task = pid ? pid_task(pid, PIDTYPE_PID) : NULL;
+	if (task)
+		get_task_struct(task);
+	rcu_read_unlock();
+	return task;
+}
+
+static bool dfm_gyro_range_has_event(struct task_struct *task,
+				     unsigned long start, unsigned long len)
+{
+	void *buf;
+	unsigned long off;
+	int n;
+	bool found = false;
+
+	if (!dfm_access_process_vm)
+		return false;
+	buf = kvmalloc(len, GFP_KERNEL);
+	if (!buf)
+		return false;
+	n = dfm_access_process_vm(task, start, buf, (int)len, 0);
+	if (n >= (int)DFM_GYRO_EVENT_SIZE) {
+		for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n;
+		     off += 4) {
+			u32 version, sensor, type;
+			u64 timestamp;
+
+			memcpy(&version, (char *)buf + off + 0x00, sizeof(version));
+			memcpy(&sensor, (char *)buf + off + 0x04, sizeof(sensor));
+			memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
+			memcpy(&timestamp, (char *)buf + off + 0x10,
+			       sizeof(timestamp));
+			if (version == 1 && sensor && timestamp &&
+			    (type == DFM_GYRO_TYPE_CAL ||
+			     type == DFM_GYRO_TYPE_UNCAL)) {
+				found = true;
+				break;
+			}
+		}
+	}
+	kvfree(buf);
+	return found;
+}
+
+/* Find one ashmem/memfd mapping in the target that is large enough to hold a
+ * sensor event queue.  Prefer a mapping that already contains a gyro event. */
+static int dfm_gyro_direct_find_range(struct task_struct *task,
+				      unsigned long *start,
+				      unsigned long *len)
+{
+	struct dfm_gyro_direct_range ranges[DFM_GYRO_DIRECT_MAX_RANGES];
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	unsigned int nr = 0;
+	unsigned int i;
+	unsigned long bytes;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		return -ESRCH;
+	mmap_read_lock(mm);
+	for (vma = mm->mmap; vma && nr < ARRAY_SIZE(ranges); vma = vma->vm_next) {
+		/* The app may map the direct report read-only; HAL owns the
+		 * writable side.  Include read-only shared mappings and use
+		 * FOLL_FORCE for the rewrite. */
+		if (!(vma->vm_flags & VM_SHARED) || !(vma->vm_flags & VM_READ))
+			continue;
+		if (!dfm_gyro_direct_path(vma))
+			continue;
+		bytes = vma->vm_end - vma->vm_start;
+		if (bytes < DFM_GYRO_EVENT_SIZE)
+			continue;
+		if (bytes > DFM_GYRO_DIRECT_MAX_BYTES)
+			bytes = DFM_GYRO_DIRECT_MAX_BYTES;
+		ranges[nr].start = vma->vm_start;
+		ranges[nr].len = bytes;
+		nr++;
+	}
+	mmap_read_unlock(mm);
+	mmput(mm);
+
+	for (i = 0; i < nr; i++) {
+		if (dfm_gyro_range_has_event(task, ranges[i].start,
+					     ranges[i].len)) {
+			*start = ranges[i].start;
+			*len = ranges[i].len;
+			return 0;
+		}
+	}
+	/* No event yet (queue still empty).  Use the first candidate; the
+	 * worker keeps scanning it and will catch events once the game runs. */
+	if (nr) {
+		*start = ranges[0].start;
+		*len = ranges[0].len;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+/* Read the target queue, rewrite every gyroscope event's x/y.  Runs from a
+ * workqueue, so access_process_vm() may sleep. */
+static int dfm_gyro_direct_scan_range(struct task_struct *task,
+				      unsigned long start, unsigned long len,
+				      void *buf, int *events)
+{
+	int n;
+	unsigned long off;
+
+	n = dfm_access_process_vm(task, start, buf, (int)len, 0);
+	if (n < (int)DFM_GYRO_EVENT_SIZE)
+		return -EFAULT;
+
+	for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n; off += 4) {
+		u32 version, sensor, type;
+		u64 timestamp, xy;
+
+		memcpy(&version, (char *)buf + off + 0x00, sizeof(version));
+		memcpy(&sensor, (char *)buf + off + 0x04, sizeof(sensor));
+		memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
+		memcpy(&timestamp, (char *)buf + off + 0x10, sizeof(timestamp));
+		if (version != 1 || !sensor || !timestamp)
+			continue;
+		if (type != DFM_GYRO_TYPE_CAL && type != DFM_GYRO_TYPE_UNCAL)
+			continue;
+
+		atomic64_inc(&dfm_gyro_direct_events);
+		(*events)++;
+		xy = ((u64)READ_ONCE(dfm_gyro_y_bits) << 32) |
+		     (u64)READ_ONCE(dfm_gyro_x_bits);
+		if (dfm_access_process_vm(task, start + off + DFM_GYRO_DATA_OFF,
+					  &xy, sizeof(xy),
+					  FOLL_WRITE | FOLL_FORCE) == (int)sizeof(xy))
+			atomic64_inc(&dfm_gyro_direct_writes);
+	}
+	return 0;
+}
+
+static void dfm_gyro_direct_work_fn(struct work_struct *work)
+{
+	void *buf = (void *)READ_ONCE(dfm_gyro_direct_buf);
+
+	if (!READ_ONCE(dfm_gyro_direct_active) ||
+	    !READ_ONCE(dfm_gyro_enabled))
+		return;
+	if (buf && dfm_gyro_direct_task) {
+		int events = 0;
+
+		dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
+					   dfm_gyro_direct_start,
+					   dfm_gyro_direct_len, buf, &events);
+	}
+	if (READ_ONCE(dfm_gyro_direct_active))
+		schedule_delayed_work(&dfm_gyro_direct_work,
+				      msecs_to_jiffies(DFM_GYRO_DIRECT_INTERVAL_MS));
+}
+
+static void dfm_gyro_direct_stop(void)
+{
+	WRITE_ONCE(dfm_gyro_direct_active, false);
+	cancel_delayed_work_sync(&dfm_gyro_direct_work);
+	if (dfm_gyro_direct_task) {
+		put_task_struct(dfm_gyro_direct_task);
+		dfm_gyro_direct_task = NULL;
+	}
+	if (dfm_gyro_direct_buf) {
+		kvfree(dfm_gyro_direct_buf);
+		dfm_gyro_direct_buf = NULL;
+	}
+	dfm_gyro_direct_start = 0;
+	dfm_gyro_direct_len = 0;
+}
+
+static int dfm_gyro_direct_start(pid_t tgid)
+{
+	struct task_struct *task;
+	unsigned long start = 0, len = 0;
+	void *buf;
+	int ret;
+
+	if (!dfm_access_process_vm)
+		return -EOPNOTSUPP;
+	if (READ_ONCE(dfm_gyro_direct_active))
+		return 0;
+
+	task = dfm_gyro_direct_get_task(tgid);
+	if (!task)
+		return -ESRCH;
+
+	ret = dfm_gyro_direct_find_range(task, &start, &len);
+	if (ret) {
+		put_task_struct(task);
+		return ret;
+	}
+
+	buf = kvmalloc(len, GFP_KERNEL);
+	if (!buf) {
+		put_task_struct(task);
+		return -ENOMEM;
+	}
+
+	dfm_gyro_direct_task = task;
+	dfm_gyro_direct_start = start;
+	dfm_gyro_direct_len = len;
+	dfm_gyro_direct_buf = buf;
+	WRITE_ONCE(dfm_gyro_direct_active, true);
+	schedule_delayed_work(&dfm_gyro_direct_work,
+			      msecs_to_jiffies(DFM_GYRO_DIRECT_INTERVAL_MS));
+	return 0;
+}
 
 static int dfm_gyro_read32(struct iovec *iov, unsigned int n,
 			   unsigned long off, u32 *out)
@@ -369,6 +636,14 @@ static int dfm_gyro_register_locked(void)
 int dfm_gyro_init(void)
 {
 	mutex_init(&dfm_gyro_lock);
+	INIT_DELAYED_WORK(&dfm_gyro_direct_work, dfm_gyro_direct_work_fn);
+	dfm_gyro_direct_task = NULL;
+	dfm_gyro_direct_buf = NULL;
+	dfm_gyro_direct_start = 0;
+	dfm_gyro_direct_len = 0;
+	WRITE_ONCE(dfm_gyro_direct_active, false);
+	atomic64_set(&dfm_gyro_direct_events, 0);
+	atomic64_set(&dfm_gyro_direct_writes, 0);
 	if (DFM_GYRO_DIAG_LOG)
 		pr_info("dfm_gyro: init, diagnostic log enabled\n");
 	dfm_gyro_registered = false;
@@ -387,6 +662,7 @@ void dfm_gyro_exit(void)
 {
 	mutex_lock(&dfm_gyro_lock);
 	WRITE_ONCE(dfm_gyro_enabled, false);
+	dfm_gyro_direct_stop();
 	dfm_gyro_unregister_locked();
 	mutex_unlock(&dfm_gyro_lock);
 	mutex_destroy(&dfm_gyro_lock);
@@ -413,6 +689,7 @@ long dfm_gyro_ioctl(void __user *arg)
 			ret = -EINVAL;
 			break;
 		}
+		dfm_gyro_direct_stop();
 		WRITE_ONCE(dfm_gyro_tgid, req.pid);
 		WRITE_ONCE(dfm_gyro_x_bits, req.x_bits);
 		WRITE_ONCE(dfm_gyro_y_bits, req.y_bits);
@@ -422,6 +699,8 @@ long dfm_gyro_ioctl(void __user *arg)
 		ret = dfm_gyro_register_locked();
 		if (ret)
 			WRITE_ONCE(dfm_gyro_enabled, false);
+		if (!ret)
+			(void)dfm_gyro_direct_start(req.pid);
 		if (DFM_GYRO_DIAG_LOG)
 			pr_info("dfm_gyro: set pid=%d active=%d ret=%ld\n", req.pid, READ_ONCE(dfm_gyro_registered), ret);
 		break;
@@ -434,16 +713,20 @@ long dfm_gyro_ioctl(void __user *arg)
 		ret = dfm_gyro_register_locked();
 		if (ret)
 			WRITE_ONCE(dfm_gyro_enabled, false);
+		if (!ret)
+			(void)dfm_gyro_direct_start(READ_ONCE(dfm_gyro_tgid));
 		if (DFM_GYRO_DIAG_LOG)
 			pr_info("dfm_gyro: enable pid=%d active=%d ret=%ld\n", READ_ONCE(dfm_gyro_tgid), READ_ONCE(dfm_gyro_registered), ret);
 		break;
 	case DFM_GYRO_CMD_DISABLE:
 		WRITE_ONCE(dfm_gyro_enabled, false);
+		dfm_gyro_direct_stop();
 		if (DFM_GYRO_DIAG_LOG)
 			pr_info("dfm_gyro: disable\n");
 		break;
 	case DFM_GYRO_CMD_REMOVE:
 		WRITE_ONCE(dfm_gyro_enabled, false);
+		dfm_gyro_direct_stop();
 		dfm_gyro_unregister_locked();
 		WRITE_ONCE(dfm_gyro_tgid, 0);
 		if (DFM_GYRO_DIAG_LOG)
@@ -474,6 +757,9 @@ long dfm_gyro_ioctl(void __user *arg)
 			  (dfm_copy_to_user_nofault ? 2u : 0u);
 	req.sample_count = READ_ONCE(dfm_gyro_sample_count);
 	memcpy(req.samples, dfm_gyro_samples, sizeof(req.samples));
+	req.direct_events = (u32)atomic64_read(&dfm_gyro_direct_events);
+	req.direct_writes = (u32)atomic64_read(&dfm_gyro_direct_writes);
+	req.direct_addr = (u64)dfm_gyro_direct_start;
 	mutex_unlock(&dfm_gyro_lock);
 
 	if (ret)

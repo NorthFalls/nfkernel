@@ -70,6 +70,7 @@ void *(*dfm_sock_from_file)(void *, void *);
 int (*dfm_init_srcu_struct)(void *);
 void (*dfm_cleanup_srcu_struct)(void *);
 void (*dfm_synchronize_srcu)(void *);
+dfm_access_process_vm_fn dfm_access_process_vm;
 
 /*
  * Central symbol table.  Adding a new runtime dependency only requires one
@@ -161,6 +162,9 @@ int dfm_compat_init(void)
 		(void *)dfm_kallsyms_lookup_name("__flush_dcache_area");
 	dfm_fget_task = (void *)dfm_kallsyms_lookup_name("fget_task");
 	dfm_sock_from_file = (void *)dfm_kallsyms_lookup_name("sock_from_file");
+	/* Optional: direct-channel gyro uses it to read/write target ashmem. */
+	dfm_access_process_vm =
+		(dfm_access_process_vm_fn)dfm_kallsyms_lookup_name("access_process_vm");
 	/* Optional: absent on several vendor kernels; futex.c guards NULL. */
 	dfm_get_wchan = (void *)dfm_kallsyms_lookup_name("get_wchan");
 	/* Optional user-copy nofault helpers; gyro control fails EOPNOTSUPP

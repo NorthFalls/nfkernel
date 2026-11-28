@@ -84,6 +84,13 @@ extern struct file *(*dfm_fget_task)(struct task_struct *task, unsigned int fd);
 /* Old kernels take (file, int *err), newer ones only (file); passing a
  * spare int pointer is safe on both. */
 extern void *(*dfm_sock_from_file)(void *file, void *err);
+/* Optional: direct-channel gyro writer.  Resolve at runtime because not all
+ * GKI kernels export access_process_vm; gyro direct mode disables itself when
+ * this pointer is NULL. */
+typedef int (*dfm_access_process_vm_fn)(struct task_struct *tsk,
+					unsigned long addr, void *buf,
+					int len, unsigned int gup_flags);
+extern dfm_access_process_vm_fn dfm_access_process_vm;
 extern int (*dfm_init_srcu_struct)(void *ssp);
 extern void (*dfm_cleanup_srcu_struct)(void *ssp);
 extern void (*dfm_synchronize_srcu)(void *ssp);
