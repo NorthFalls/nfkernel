@@ -9,6 +9,7 @@
 #include <linux/string.h>
 #include <linux/version.h>
 
+#include "compat.h"
 #include "sf_avc.h"
 
 #ifndef __nocfi

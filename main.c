@@ -403,7 +403,10 @@ static void prepare_unload_workfn(struct work_struct *work)
         g_reboot_kprobe_registered = 0;
         /* Pending task work pins the module. Drain the return instructions
          * of callbacks that just dropped their references. */
-        synchronize_rcu_tasks();
+        if (dfm_synchronize_rcu_tasks)
+            dfm_synchronize_rcu_tasks();
+        else
+            synchronize_rcu();
     }
     if (!ret)
         dfm_sf_avc_exit();
@@ -507,28 +510,6 @@ static int expose_unload_controls(void) { return -EOPNOTSUPP; }
 
 /* ---- module init/exit ---- */
 
-static bool __init proc_entry_exists(const char *name)
-{
-    struct path path;
-
-    if (kern_path(name, 0, &path))
-        return false;
-    path_put(&path);
-    return true;
-}
-
-static void __init remove_inte_proc_entries(void)
-{
-    /* Best-effort existence checks avoid removing already absent entries.
-     * Checking existence only looks up the path; it does not open/read it. */
-    if (proc_entry_exists("/proc/inte_ko"))
-        remove_proc_entry("inte_ko", NULL);
-    if (proc_entry_exists("/proc/inte_systbl"))
-        remove_proc_entry("inte_systbl", NULL);
-    if (proc_entry_exists("/proc/inte_status"))
-        remove_proc_entry("inte_status", NULL);
-}
-
 static int __init mod_init(void)
 {
     int ret;
@@ -586,8 +567,6 @@ static int __init mod_init(void)
         pr_warn("CPU-clock mitigation unavailable: %d\n", ret);
 
     (void)kgsl_hide_init();
-
-    remove_inte_proc_entries();
 
     /* Keep the loader-owned objects alive while sysfs is detached. Explicit
      * unload preparation restores them before releasing the lifetime pin. */

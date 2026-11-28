@@ -26,6 +26,7 @@ typedef struct fileattr dfm_fileattr_t;
 #endif
 #endif
 
+#include "compat.h"
 #include "abi.h"
 #include "file_observer.h"
 
