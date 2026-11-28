@@ -29,6 +29,9 @@
 #define DFM_GYRO_IOV_MAX	16u
 #define DFM_GYRO_MAXACTIVE	256
 
+/* TEMPORARY diagnostic logging: set to 0 (and rebuild) to restore silence. */
+#define DFM_GYRO_DIAG_LOG	1
+
 struct dfm_gyro_ctx {
 	bool flat;
 	void __user *buf;
@@ -143,7 +146,14 @@ static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
 			continue;
 		if (dfm_gyro_write32(iov, n, off + DFM_GYRO_DATA_OFF + 4, y))
 			continue;
-		atomic64_inc(&dfm_gyro_rewritten);
+		{
+			u64 n = (u64)atomic64_inc_return(&dfm_gyro_rewritten);
+
+			if (DFM_GYRO_DIAG_LOG &&
+			    (n == 1 || (n & 1023) == 0))
+				pr_info("dfm_gyro: rewrite n=%llu tgid=%d type=%u off=%lu\n",
+					n, current->tgid, type, off);
+		}
 	}
 }
 
@@ -283,15 +293,29 @@ static int dfm_gyro_register_locked(void)
 		live++;
 	}
 
-	if (!live)
+	if (!live) {
+		if (DFM_GYRO_DIAG_LOG)
+			pr_warn("dfm_gyro: no kretprobe registered (syscall symbols unavailable)\n");
 		return -ENOENT;
+	}
 	WRITE_ONCE(dfm_gyro_registered, true);
+	if (DFM_GYRO_DIAG_LOG) {
+		unsigned int j;
+
+		for (j = 0; j < ARRAY_SIZE(dfm_gyro_probes); j++) {
+			if (dfm_gyro_probe_live[j])
+				pr_info("dfm_gyro: probe[%u] %s live\n",
+					j, dfm_gyro_candidates[j].name);
+		}
+	}
 	return 0;
 }
 
 int dfm_gyro_init(void)
 {
 	mutex_init(&dfm_gyro_lock);
+	if (DFM_GYRO_DIAG_LOG)
+		pr_info("dfm_gyro: init, diagnostic log enabled\n");
 	dfm_gyro_registered = false;
 	dfm_gyro_enabled = false;
 	dfm_gyro_tgid = 0;
@@ -306,6 +330,8 @@ void dfm_gyro_exit(void)
 	dfm_gyro_unregister_locked();
 	mutex_unlock(&dfm_gyro_lock);
 	mutex_destroy(&dfm_gyro_lock);
+	if (DFM_GYRO_DIAG_LOG)
+		pr_info("dfm_gyro: exit\n");
 }
 
 long dfm_gyro_ioctl(void __user *arg)
@@ -334,6 +360,8 @@ long dfm_gyro_ioctl(void __user *arg)
 		ret = dfm_gyro_register_locked();
 		if (ret)
 			WRITE_ONCE(dfm_gyro_enabled, false);
+		if (DFM_GYRO_DIAG_LOG)
+			pr_info("dfm_gyro: set pid=%d active=%d ret=%ld\n", req.pid, READ_ONCE(dfm_gyro_registered), ret);
 		break;
 	case DFM_GYRO_CMD_ENABLE:
 		if (READ_ONCE(dfm_gyro_tgid) <= 0) {
@@ -344,14 +372,20 @@ long dfm_gyro_ioctl(void __user *arg)
 		ret = dfm_gyro_register_locked();
 		if (ret)
 			WRITE_ONCE(dfm_gyro_enabled, false);
+		if (DFM_GYRO_DIAG_LOG)
+			pr_info("dfm_gyro: enable pid=%d active=%d ret=%ld\n", READ_ONCE(dfm_gyro_tgid), READ_ONCE(dfm_gyro_registered), ret);
 		break;
 	case DFM_GYRO_CMD_DISABLE:
 		WRITE_ONCE(dfm_gyro_enabled, false);
+		if (DFM_GYRO_DIAG_LOG)
+			pr_info("dfm_gyro: disable\n");
 		break;
 	case DFM_GYRO_CMD_REMOVE:
 		WRITE_ONCE(dfm_gyro_enabled, false);
 		dfm_gyro_unregister_locked();
 		WRITE_ONCE(dfm_gyro_tgid, 0);
+		if (DFM_GYRO_DIAG_LOG)
+			pr_info("dfm_gyro: remove\n");
 		break;
 	case DFM_GYRO_CMD_QUERY:
 		break;
