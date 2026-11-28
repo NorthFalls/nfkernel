@@ -23,7 +23,6 @@
 
 #define DFM_GYRO_EVENT_SIZE	0x68u
 #define DFM_GYRO_TYPE_HAL	0x08u
-#define DFM_GYRO_TYPE_NDK	0x04u
 #define DFM_GYRO_DATA_OFF	0x18u
 #define DFM_GYRO_TYPE_CAL	4
 #define DFM_GYRO_TYPE_UNCAL	16
@@ -122,11 +121,11 @@ static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
 		u32 type = 0, x, y;
 		bool found = false;
 
+		/* 只认 HAL ASensorEvent 的 type@+0x08。不要用 +0x04 的
+		 * NDK 猜测回退：HAL 的 sensor id 也可能是 4/16，会把
+		 * 加速度计/磁力计误判成陀螺仪，产生改写副作用。
+		 */
 		if (!dfm_gyro_read32(iov, n, off + DFM_GYRO_TYPE_HAL, &type) &&
-		    (type == DFM_GYRO_TYPE_CAL || type == DFM_GYRO_TYPE_UNCAL))
-			found = true;
-		if (!found &&
-		    !dfm_gyro_read32(iov, n, off + DFM_GYRO_TYPE_NDK, &type) &&
 		    (type == DFM_GYRO_TYPE_CAL || type == DFM_GYRO_TYPE_UNCAL))
 			found = true;
 		if (!found)
