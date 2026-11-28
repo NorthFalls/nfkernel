@@ -118,7 +118,7 @@ static void info(const char* text) {
 
 static void ok(const char* text) {
     if (!g_quiet)
-        std::printf("%s[+] %s%s\n", kGreen, text, kReset);
+        std::printf("%s[√] %s%s\n", kGreen, text, kReset);
 }
 
 static void err(const char* text) {
@@ -132,14 +132,15 @@ static void warn(const char* text) {
 
 static void banner() {
     std::printf("\033[2J\033[H");
+    std::printf("%s<<<Welcome to NFKernel %s Driver!>>>%s\n\n", kYellow,
+                kVersion, kReset);
     std::printf("%s", kMagenta);
     std::puts("      _  __         __  __   ____     ____");
     std::puts("     / |/ /__  ____/ /_/ /  / __/__ _/ / /");
     std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
     std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
-    std::printf("\n%s  NFKernel %s  -  Driver Loader%s\n\n", kYellow, kVersion,
-                kReset);
+    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
                 kYellow, kReset);
     std::printf("%s    %s%s\n", kTeal, kTgUrl, kReset);
@@ -828,7 +829,7 @@ static bool check_version() {
         return false;
     }
     if (!g_quiet)
-        std::printf("%s[+] 驱动版本验证通过%s\n",
+        std::printf("%s[√] 驱动版本验证通过,当前已是最新版本!%s\n",
                     kMagenta, kReset);
     return true;
 }
@@ -1324,22 +1325,12 @@ static size_t build_groups(SeriesGroup* groups, size_t capacity) {
 
 static void show_menu(const SeriesGroup* groups, size_t group_count,
                       int detected) {
-    int current = -1;
-    for (size_t i = 0; i < group_count; ++i) {
-        if (detected >= 0 && size_t(detected) >= groups[i].first &&
-            size_t(detected) < groups[i].first + groups[i].count) {
-            current = int(i);
-            break;
-        }
-    }
+    (void)detected;
     for (size_t i = 0; i < group_count; ++i) {
         const char* count_text =
             groups[i].count == 1 ? "一" : groups[i].count == 2 ? "二" : "多";
-        std::printf("%s[%zu] 内核版本：%-6s（%s个子方案）%s",
+        std::printf("%s[%zu] 内核版本：%-6s        （%s个子方案）%s\n",
                     kMagenta, i + 1, groups[i].series, count_text, kReset);
-        if (int(i) == current)
-            std::printf("%s  ← 当前%s", kGreen, kReset);
-        std::printf("\n");
     }
     std::printf("%s[%zu] 退出程序%s\n", kMagenta, group_count + 1, kReset);
 }
@@ -1570,12 +1561,8 @@ int main(int argc, char** argv) {
     if (!check_version())
         return kExitFailure;
 
-    std::printf("\n%s[i] 当前内核：%s%s", kTeal, kReset,
+    std::printf("\n%s[-] 你的当前内核版本是：%s%s\n\n", kTeal, kReset,
                 release.empty() ? "unknown" : release.c_str());
-    const int android_major = detect_android_major();
-    if (android_major > 0)
-        std::printf("%s  Android %d%s", kTeal, android_major, kReset);
-    std::printf("\n\n");
 
     if (!kmi.empty())
         return load_kmi(kmi.c_str(), params, true);
