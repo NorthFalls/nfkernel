@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(nfkernel VERSION 1.8 LANGUAGES CXX)
+    project(nfkernel VERSION 2.0 LANGUAGES CXX)
 endif()
 
 if(NOT ANDROID OR NOT CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
@@ -82,7 +82,7 @@ configure_package_config_file(cmake/nfkernelConfig.cmake.in
     INSTALL_DESTINATION lib/cmake/nfkernel
 )
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/nfkernelConfigVersion.cmake"
-    VERSION 1.8 COMPATIBILITY SameMajorVersion
+    VERSION 2.0 COMPATIBILITY SameMajorVersion
 )
 install(TARGETS nfkernel_sdk EXPORT nfkernelTargets ARCHIVE DESTINATION lib)
 install(EXPORT nfkernelTargets NAMESPACE nfkernel:: DESTINATION lib/cmake/nfkernel)

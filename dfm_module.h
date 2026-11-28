@@ -8,7 +8,7 @@
  * translation unit without pulling in unnecessary dependencies.
  */
 
-#define DFM_MODULE_VERSION "1.8"
+#define DFM_MODULE_VERSION "2.0"
 
 enum dfm_stage_mode {
 	DFM_STAGE_FULL = 0,	/* syscall hook + reboot kprobe */
