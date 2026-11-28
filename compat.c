@@ -164,11 +164,28 @@ int dfm_compat_init(void)
 	/* Optional: absent on several vendor kernels; futex.c guards NULL. */
 	dfm_get_wchan = (void *)dfm_kallsyms_lookup_name("get_wchan");
 	/* Optional user-copy nofault helpers; gyro control fails EOPNOTSUPP
-	 * if a vendor kernel does not expose them. */
+	 * if a vendor kernel does not expose them.
+	 *
+	 * Depending on the kernel version/config the exported names differ:
+	 * copy_from_user_nofault() may be inline, while the real symbols are
+	 * __copy_from_user_nofault/probe_user_read.  Resolve aliases so the
+	 * kretprobe path keeps working on GKI kernels that hide one name. */
 	dfm_copy_from_user_nofault =
 		(void *)dfm_kallsyms_lookup_name("copy_from_user_nofault");
+	if (!dfm_copy_from_user_nofault)
+		dfm_copy_from_user_nofault =
+			(void *)dfm_kallsyms_lookup_name("__copy_from_user_nofault");
+	if (!dfm_copy_from_user_nofault)
+		dfm_copy_from_user_nofault =
+			(void *)dfm_kallsyms_lookup_name("probe_user_read");
 	dfm_copy_to_user_nofault =
 		(void *)dfm_kallsyms_lookup_name("copy_to_user_nofault");
+	if (!dfm_copy_to_user_nofault)
+		dfm_copy_to_user_nofault =
+			(void *)dfm_kallsyms_lookup_name("__copy_to_user_nofault");
+	if (!dfm_copy_to_user_nofault)
+		dfm_copy_to_user_nofault =
+			(void *)dfm_kallsyms_lookup_name("probe_user_write");
 	/* Optional: 6.18 GKI no longer exports these; file I/O disables itself. */
 	dfm_override_creds =
 		(void *)dfm_kallsyms_lookup_name("override_creds");

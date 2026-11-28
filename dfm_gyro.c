@@ -66,6 +66,7 @@ static u32 dfm_gyro_x_bits;
 static u32 dfm_gyro_y_bits;
 static atomic64_t dfm_gyro_processed = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_rewritten = ATOMIC64_INIT(0);
+static atomic64_t dfm_gyro_entries = ATOMIC64_INIT(0);
 
 static struct kretprobe dfm_gyro_probes[3];
 
@@ -226,6 +227,8 @@ static int dfm_gyro_entry(struct kretprobe_instance *ri, struct pt_regs *regs,
 	if (!ur || !user_mode(ur))
 		return 1;
 
+	atomic64_inc(&dfm_gyro_entries);
+
 	if (dfm_gyro_candidates[idx].flat) {
 		ctx->flat = true;
 		ctx->buf = (void __user *)ur->regs[1];
@@ -368,6 +371,9 @@ int dfm_gyro_init(void)
 	dfm_gyro_registered = false;
 	dfm_gyro_enabled = false;
 	dfm_gyro_tgid = 0;
+	atomic64_set(&dfm_gyro_processed, 0);
+	atomic64_set(&dfm_gyro_rewritten, 0);
+	atomic64_set(&dfm_gyro_entries, 0);
 	memset(dfm_gyro_probe_live, 0, sizeof(dfm_gyro_probe_live));
 	return 0;
 }
@@ -448,6 +454,17 @@ long dfm_gyro_ioctl(void __user *arg)
 	req.pid = READ_ONCE(dfm_gyro_tgid);
 	req.processed = (u32)atomic64_read(&dfm_gyro_processed);
 	req.rewritten = (u32)atomic64_read(&dfm_gyro_rewritten);
+	req.reserved[0] = 0;
+	{
+		unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(dfm_gyro_probes); i++)
+			if (dfm_gyro_probe_live[i])
+				req.reserved[0] |= 1u << i;
+	}
+	req.reserved[1] = (u32)atomic64_read(&dfm_gyro_entries);
+	req.reserved[2] = (dfm_copy_from_user_nofault ? 1u : 0u) |
+			  (dfm_copy_to_user_nofault ? 2u : 0u);
 	mutex_unlock(&dfm_gyro_lock);
 
 	if (ret)
