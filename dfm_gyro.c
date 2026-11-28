@@ -96,7 +96,7 @@ struct dfm_gyro_direct_range {
 };
 
 static struct task_struct *dfm_gyro_direct_task;
-static unsigned long dfm_gyro_direct_start;
+static unsigned long dfm_gyro_direct_base;
 static unsigned long dfm_gyro_direct_len;
 static void *dfm_gyro_direct_buf;
 static bool dfm_gyro_direct_active;
@@ -295,7 +295,7 @@ static void dfm_gyro_direct_work_fn(struct work_struct *work)
 		int events = 0;
 
 		dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
-					   dfm_gyro_direct_start,
+					   dfm_gyro_direct_base,
 					   dfm_gyro_direct_len, buf, &events);
 	}
 	if (READ_ONCE(dfm_gyro_direct_active))
@@ -315,7 +315,7 @@ static void dfm_gyro_direct_stop(void)
 		kvfree(dfm_gyro_direct_buf);
 		dfm_gyro_direct_buf = NULL;
 	}
-	dfm_gyro_direct_start = 0;
+	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
 }
 
@@ -348,7 +348,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 	}
 
 	dfm_gyro_direct_task = task;
-	dfm_gyro_direct_start = start;
+	dfm_gyro_direct_base = start;
 	dfm_gyro_direct_len = len;
 	dfm_gyro_direct_buf = buf;
 	WRITE_ONCE(dfm_gyro_direct_active, true);
@@ -639,7 +639,7 @@ int dfm_gyro_init(void)
 	INIT_DELAYED_WORK(&dfm_gyro_direct_work, dfm_gyro_direct_work_fn);
 	dfm_gyro_direct_task = NULL;
 	dfm_gyro_direct_buf = NULL;
-	dfm_gyro_direct_start = 0;
+	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, false);
 	atomic64_set(&dfm_gyro_direct_events, 0);
@@ -759,7 +759,7 @@ long dfm_gyro_ioctl(void __user *arg)
 	memcpy(req.samples, dfm_gyro_samples, sizeof(req.samples));
 	req.direct_events = (u32)atomic64_read(&dfm_gyro_direct_events);
 	req.direct_writes = (u32)atomic64_read(&dfm_gyro_direct_writes);
-	req.direct_addr = (u64)dfm_gyro_direct_start;
+	req.direct_addr = (u64)dfm_gyro_direct_base;
 	mutex_unlock(&dfm_gyro_lock);
 
 	if (ret)
