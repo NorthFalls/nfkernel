@@ -31,6 +31,8 @@
 #include "compat.h"
 
 #define DFM_GYRO_EVENT_SIZE	0x68u
+/* HAL sensors_event_t.version must be sizeof(sensors_event_t), not 1. */
+#define DFM_GYRO_EVENT_VERSION	0x68u
 #define DFM_GYRO_TYPE_HAL	0x08u
 #define DFM_GYRO_DATA_OFF	0x18u
 #define DFM_GYRO_TYPE_CAL	4
@@ -192,7 +194,7 @@ static bool dfm_gyro_range_has_event(struct task_struct *task,
 			memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
 			memcpy(&timestamp, (char *)buf + off + 0x10,
 			       sizeof(timestamp));
-			if (version == 1 && sensor && timestamp &&
+			if (version == DFM_GYRO_EVENT_VERSION && sensor && timestamp &&
 			    (type == DFM_GYRO_TYPE_CAL ||
 			     type == DFM_GYRO_TYPE_UNCAL)) {
 				found = true;
@@ -314,7 +316,7 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 		memcpy(&sensor, (char *)buf + off + 0x04, sizeof(sensor));
 		memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
 		memcpy(&timestamp, (char *)buf + off + 0x10, sizeof(timestamp));
-		if (version != 1 || !sensor || !timestamp)
+		if (version != DFM_GYRO_EVENT_VERSION || !sensor || !timestamp)
 			continue;
 		if (type != DFM_GYRO_TYPE_CAL && type != DFM_GYRO_TYPE_UNCAL)
 			continue;
