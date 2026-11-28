@@ -93,6 +93,7 @@ static u32 dfm_gyro_sample_count;
 struct dfm_gyro_direct_range {
 	unsigned long start;
 	unsigned long len;
+	bool writable;
 };
 
 static struct task_struct *dfm_gyro_direct_task;
@@ -235,11 +236,24 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 			bytes = DFM_GYRO_DIRECT_MAX_BYTES;
 		ranges[nr].start = vma->vm_start;
 		ranges[nr].len = bytes;
+		ranges[nr].writable = !!(vma->vm_flags & VM_WRITE);
 		nr++;
 	}
 	mmap_read_unlock(mm);
 	mmput(mm);
 
+	for (i = 0; i < nr; i++) {
+		/* Prefer a writable mapping of the same queue if the app keeps
+		 * both a read-only consumer view and a writable view. */
+		if (!ranges[i].writable)
+			continue;
+		if (dfm_gyro_range_has_event(task, ranges[i].start,
+					     ranges[i].len)) {
+			*start = ranges[i].start;
+			*len = ranges[i].len;
+			return 0;
+		}
+	}
 	for (i = 0; i < nr; i++) {
 		if (dfm_gyro_range_has_event(task, ranges[i].start,
 					     ranges[i].len)) {
@@ -803,7 +817,8 @@ long dfm_gyro_ioctl(void __user *arg)
 	}
 	req.reserved[1] = (u32)atomic64_read(&dfm_gyro_entries);
 	req.reserved[2] = (dfm_copy_from_user_nofault ? 1u : 0u) |
-			  (dfm_copy_to_user_nofault ? 2u : 0u);
+			  (dfm_copy_to_user_nofault ? 2u : 0u) |
+			  (READ_ONCE(dfm_gyro_direct_active) ? 4u : 0u);
 	req.sample_count = READ_ONCE(dfm_gyro_sample_count);
 	memcpy(req.samples, dfm_gyro_samples, sizeof(req.samples));
 	req.direct_events = (u32)atomic64_read(&dfm_gyro_direct_events);
