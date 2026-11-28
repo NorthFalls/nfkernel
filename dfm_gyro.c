@@ -86,7 +86,7 @@ static u32 dfm_gyro_sample_count;
  * every gyroscope record.  It only starts when the private D48 ioctl enables
  * it, so module load is unaffected.
  */
-#define DFM_GYRO_DIRECT_MAX_RANGES	8
+#define DFM_GYRO_DIRECT_MAX_RANGES	32
 #define DFM_GYRO_DIRECT_MAX_BYTES	(256u * 1024u)
 #define DFM_GYRO_DIRECT_INTERVAL_MS	8
 
@@ -103,6 +103,7 @@ static bool dfm_gyro_direct_active;
 static struct delayed_work dfm_gyro_direct_work;
 static atomic64_t dfm_gyro_direct_writes = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_direct_events = ATOMIC64_INIT(0);
+static unsigned int dfm_gyro_direct_fail_streak;
 
 static void dfm_gyro_direct_work_fn(struct work_struct *work);
 
@@ -300,10 +301,18 @@ static void dfm_gyro_direct_work_fn(struct work_struct *work)
 		return;
 	if (buf && dfm_gyro_direct_task) {
 		int events = 0;
+		int ret;
 
-		dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
-					   dfm_gyro_direct_base,
-					   dfm_gyro_direct_len, buf, &events);
+		ret = dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
+						 dfm_gyro_direct_base,
+						 dfm_gyro_direct_len,
+						 buf, &events);
+		if (ret) {
+			if (++dfm_gyro_direct_fail_streak >= 64)
+				WRITE_ONCE(dfm_gyro_direct_active, false);
+		} else {
+			dfm_gyro_direct_fail_streak = 0;
+		}
 	}
 	if (READ_ONCE(dfm_gyro_direct_active))
 		schedule_delayed_work(&dfm_gyro_direct_work,
@@ -324,6 +333,7 @@ static void dfm_gyro_direct_stop(void)
 	}
 	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
+	dfm_gyro_direct_fail_streak = 0;
 }
 
 static int dfm_gyro_direct_start(pid_t tgid)
@@ -337,6 +347,10 @@ static int dfm_gyro_direct_start(pid_t tgid)
 		return -EOPNOTSUPP;
 	if (READ_ONCE(dfm_gyro_direct_active))
 		return 0;
+	/* A previous worker may have stopped itself after repeated failures;
+	 * its task/buffer are still owned here until the next start/stop. */
+	if (dfm_gyro_direct_task || dfm_gyro_direct_buf)
+		dfm_gyro_direct_stop();
 
 	task = dfm_gyro_direct_get_task(tgid);
 	if (!task)
@@ -358,6 +372,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 	dfm_gyro_direct_base = start;
 	dfm_gyro_direct_len = len;
 	dfm_gyro_direct_buf = buf;
+	dfm_gyro_direct_fail_streak = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, true);
 	schedule_delayed_work(&dfm_gyro_direct_work,
 			      msecs_to_jiffies(DFM_GYRO_DIRECT_INTERVAL_MS));
