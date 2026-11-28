@@ -40,7 +40,7 @@
 #include "file_observer.h"
 #include "compat.h"
 #include "module_sysfs.h"
-#include "nfk_gyro.h"
+#include "dfm_gyro.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("DFM");
@@ -94,8 +94,8 @@ static long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     void __user *argp = (void __user *)arg;
 
     switch (cmd) {
-    case NFK_GYRO_IOC_CTRL:
-        return nfk_gyro_ioctl(argp);
+    case DFM_GYRO_IOC_CTRL:
+        return dfm_gyro_ioctl(argp);
     case MEM_IOC_CAPABILITIES:
         return dfm_capabilities(argp);
     case DFM_FILE_OBSERVER_IOC_OPEN:
@@ -581,15 +581,15 @@ static int __init mod_init(void)
     (void)ret;
     set_install_admission(true);
 
-    /* nfkernel-only gyro feature; not part of the enenkernel ABI. */
-    (void)nfk_gyro_init();
+    /* dfm-only gyro feature; not part of the enenkernel ABI. */
+    (void)dfm_gyro_init();
 
     return 0;
 }
 
 static void __exit mod_exit(void)
 {
-	nfk_gyro_exit();
+	dfm_gyro_exit();
     /* The preparation pin permits entry only after all detachable hooks
      * that can fail to restore have been drained. */
     dfm_sf_avc_exit();
