@@ -122,7 +122,7 @@ static const char* const kCyan = "\033[38;2;125;207;255m";
 static const char* const kGreen = "\033[38;2;158;206;106m";
 static const char* const kYellow = "\033[38;2;224;175;104m";
 static const char* const kRed = "\033[38;2;247;118;142m";
-static const char* const kAccent = "\033[1;38;2;122;162;247m";
+static const char* const kAccent = "\033[36m\033[1m";
 static const char* const kTeal = "\033[38;2;125;207;255m";
 static const char* const kWarnRed = "\033[38;2;224;108;117m";
 
