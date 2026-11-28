@@ -30,7 +30,7 @@
 #define DFM_GYRO_MAXACTIVE	256
 
 /* TEMPORARY diagnostic logging: set to 0 (and rebuild) to restore silence. */
-#define DFM_GYRO_DIAG_LOG	1
+#define DFM_GYRO_DIAG_LOG	0
 
 struct dfm_gyro_ctx {
 	bool flat;
