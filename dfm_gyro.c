@@ -100,6 +100,7 @@ struct dfm_gyro_direct_range {
 
 static struct task_struct *dfm_gyro_direct_task;
 static unsigned long dfm_gyro_direct_base;
+static unsigned long dfm_gyro_direct_base_off;
 static unsigned long dfm_gyro_direct_len;
 static void *dfm_gyro_direct_buf;
 static bool dfm_gyro_direct_active;
@@ -169,8 +170,28 @@ static struct task_struct *dfm_gyro_direct_get_task(pid_t tgid)
 	return task;
 }
 
+static bool dfm_gyro_event_at(const void *buf, unsigned long len,
+			      unsigned long off, u64 *timestamp)
+{
+	u32 sensor, type;
+	u64 ts;
+
+	if (off + DFM_GYRO_EVENT_SIZE > len)
+		return false;
+	memcpy(&sensor, (const char *)buf + off + 0x04, sizeof(sensor));
+	memcpy(&type, (const char *)buf + off + 0x08, sizeof(type));
+	memcpy(&ts, (const char *)buf + off + 0x10, sizeof(ts));
+	if (!sensor || !ts)
+		return false;
+	if (type != DFM_GYRO_TYPE_CAL && type != DFM_GYRO_TYPE_UNCAL)
+		return false;
+	*timestamp = ts;
+	return true;
+}
+
 static bool dfm_gyro_range_has_event(struct task_struct *task,
-				     unsigned long start, unsigned long len)
+				     unsigned long start, unsigned long len,
+				     unsigned long *base_off)
 {
 	void *buf;
 	unsigned long off;
@@ -183,23 +204,24 @@ static bool dfm_gyro_range_has_event(struct task_struct *task,
 	if (!buf)
 		return false;
 	n = dfm_access_process_vm(task, start, buf, (int)len, 0);
-	if (n >= (int)DFM_GYRO_EVENT_SIZE) {
-		for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n;
-		     off += DFM_GYRO_EVENT_SIZE) {
-			u32 version, sensor, type;
-			u64 timestamp;
+	if (n >= (int)(2 * DFM_GYRO_EVENT_SIZE)) {
+		/* Vendor HALs do not all set sensors_event_t.version and the
+		 * direct queue may start at a non-zero mapping offset.  Locate
+		 * two consecutive valid records instead of trusting version. */
+		for (off = 0; off + 2 * DFM_GYRO_EVENT_SIZE <= (unsigned long)n;
+		     off += 4) {
+			u64 t1, t2;
 
-			memcpy(&version, (char *)buf + off + 0x00, sizeof(version));
-			memcpy(&sensor, (char *)buf + off + 0x04, sizeof(sensor));
-			memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
-			memcpy(&timestamp, (char *)buf + off + 0x10,
-			       sizeof(timestamp));
-			if (version == DFM_GYRO_EVENT_VERSION && sensor && timestamp &&
-			    (type == DFM_GYRO_TYPE_CAL ||
-			     type == DFM_GYRO_TYPE_UNCAL)) {
-				found = true;
-				break;
-			}
+			if (!dfm_gyro_event_at(buf, (unsigned long)n, off, &t1))
+				continue;
+			if (!dfm_gyro_event_at(buf, (unsigned long)n,
+					       off + DFM_GYRO_EVENT_SIZE, &t2))
+				continue;
+			if (t2 < t1)
+				continue;
+			*base_off = off;
+			found = true;
+			break;
 		}
 	}
 	kvfree(buf);
@@ -210,7 +232,8 @@ static bool dfm_gyro_range_has_event(struct task_struct *task,
  * sensor event queue.  Prefer a mapping that already contains a gyro event. */
 static int dfm_gyro_direct_find_range(struct task_struct *task,
 				      unsigned long *start,
-				      unsigned long *len)
+				      unsigned long *len,
+				      unsigned long *base_off)
 {
 	struct dfm_gyro_direct_range ranges[DFM_GYRO_DIRECT_MAX_RANGES];
 	struct mm_struct *mm;
@@ -260,7 +283,7 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 		if (!ranges[i].writable)
 			continue;
 		if (dfm_gyro_range_has_event(task, ranges[i].start,
-					     ranges[i].len)) {
+					     ranges[i].len, base_off)) {
 			*start = ranges[i].start;
 			*len = ranges[i].len;
 			return 0;
@@ -268,7 +291,7 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 	}
 	for (i = 0; i < nr; i++) {
 		if (dfm_gyro_range_has_event(task, ranges[i].start,
-					     ranges[i].len)) {
+					     ranges[i].len, base_off)) {
 			*start = ranges[i].start;
 			*len = ranges[i].len;
 			return 0;
@@ -280,15 +303,26 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 	 * the full version/sensor/type/timestamp check, and gives up after a
 	 * short idle period if this is just an unrelated ashmem buffer. */
 	if (nr) {
+		unsigned int best = nr;
+
+		*base_off = 0;
+		/* A direct report queue is usually a small dedicated ashmem
+		 * buffer; large gralloc/dmabuf mappings are unrelated. */
 		for (i = 0; i < nr; i++) {
-			if (ranges[i].writable) {
-				*start = ranges[i].start;
-				*len = ranges[i].len;
-				return 0;
+			if (!ranges[i].writable)
+				continue;
+			if (best == nr || ranges[i].len < ranges[best].len)
+				best = i;
+		}
+		if (best == nr) {
+			best = 0;
+			for (i = 1; i < nr; i++) {
+				if (ranges[i].len < ranges[best].len)
+					best = i;
 			}
 		}
-		*start = ranges[0].start;
-		*len = ranges[0].len;
+		*start = ranges[best].start;
+		*len = ranges[best].len;
 		return 0;
 	}
 	return -ENOENT;
@@ -298,6 +332,7 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
  * workqueue, so access_process_vm() may sleep. */
 static int dfm_gyro_direct_scan_range(struct task_struct *task,
 				      unsigned long start, unsigned long len,
+				      unsigned long base_off,
 				      void *buf, int *events)
 {
 	int n;
@@ -308,17 +343,11 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 	if (n < (int)DFM_GYRO_EVENT_SIZE)
 		return -EFAULT;
 
-	for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n; off += DFM_GYRO_EVENT_SIZE) {
-		u32 version, sensor, type;
+	for (off = base_off; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n;
+	     off += DFM_GYRO_EVENT_SIZE) {
 		u64 timestamp, xy;
 
-		memcpy(&version, (char *)buf + off + 0x00, sizeof(version));
-		memcpy(&sensor, (char *)buf + off + 0x04, sizeof(sensor));
-		memcpy(&type, (char *)buf + off + 0x08, sizeof(type));
-		memcpy(&timestamp, (char *)buf + off + 0x10, sizeof(timestamp));
-		if (version != DFM_GYRO_EVENT_VERSION || !sensor || !timestamp)
-			continue;
-		if (type != DFM_GYRO_TYPE_CAL && type != DFM_GYRO_TYPE_UNCAL)
+		if (!dfm_gyro_event_at(buf, (unsigned long)n, off, &timestamp))
 			continue;
 		/* The queue is a ring: old events stay in the buffer.  Only
 		 * rewrite events newer than the last one seen, otherwise we
@@ -356,6 +385,7 @@ static void dfm_gyro_direct_work_fn(struct work_struct *work)
 		ret = dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
 						 dfm_gyro_direct_base,
 						 dfm_gyro_direct_len,
+						 dfm_gyro_direct_base_off,
 						 buf, &events);
 		if (ret) {
 			if (++dfm_gyro_direct_fail_streak >= 64)
@@ -389,6 +419,7 @@ static void dfm_gyro_direct_stop(void)
 		dfm_gyro_direct_buf = NULL;
 	}
 	dfm_gyro_direct_base = 0;
+	dfm_gyro_direct_base_off = 0;
 	dfm_gyro_direct_len = 0;
 	dfm_gyro_direct_fail_streak = 0;
 	dfm_gyro_direct_idle_scans = 0;
@@ -398,7 +429,7 @@ static void dfm_gyro_direct_stop(void)
 static int dfm_gyro_direct_start(pid_t tgid)
 {
 	struct task_struct *task;
-	unsigned long start = 0, len = 0;
+	unsigned long start = 0, len = 0, base_off = 0;
 	void *buf;
 	int ret;
 
@@ -415,7 +446,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 	if (!task)
 		return -ESRCH;
 
-	ret = dfm_gyro_direct_find_range(task, &start, &len);
+	ret = dfm_gyro_direct_find_range(task, &start, &len, &base_off);
 	if (ret) {
 		put_task_struct(task);
 		return ret;
@@ -429,6 +460,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 
 	dfm_gyro_direct_task = task;
 	dfm_gyro_direct_base = start;
+	dfm_gyro_direct_base_off = base_off;
 	dfm_gyro_direct_len = len;
 	dfm_gyro_direct_buf = buf;
 	dfm_gyro_direct_fail_streak = 0;
@@ -723,6 +755,7 @@ int dfm_gyro_init(void)
 	dfm_gyro_direct_task = NULL;
 	dfm_gyro_direct_buf = NULL;
 	dfm_gyro_direct_base = 0;
+	dfm_gyro_direct_base_off = 0;
 	dfm_gyro_direct_len = 0;
 	dfm_gyro_direct_fail_streak = 0;
 	dfm_gyro_direct_idle_scans = 0;
