@@ -246,13 +246,10 @@ static int dfm_gyro_direct_find_range(struct task_struct *task,
 			return 0;
 		}
 	}
-	/* No event yet (queue still empty).  Use the first candidate; the
-	 * worker keeps scanning it and will catch events once the game runs. */
-	if (nr) {
-		*start = ranges[0].start;
-		*len = ranges[0].len;
-		return 0;
-	}
+	/* Do not fall back to an unrelated mapping.  Scanning it every few
+	 * milliseconds would waste CPU and could rewrite data that merely
+	 * looks like a sensor event.  The caller can retry once the game has
+	 * started and the direct queue contains a real gyro event. */
 	return -ENOENT;
 }
 
