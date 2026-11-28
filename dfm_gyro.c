@@ -133,15 +133,24 @@ static bool dfm_gyro_probe_live[ARRAY_SIZE(dfm_gyro_candidates)];
 static bool dfm_gyro_direct_path(struct vm_area_struct *vma)
 {
 	const char *name;
+	const char *parent = NULL;
 
-	if (!vma->vm_file)
+	if (!vma->vm_file || !vma->vm_file->f_path.dentry)
 		return false;
 	name = vma->vm_file->f_path.dentry->d_name.name;
 	if (!name)
 		return false;
-	return strstr(name, "ashmem") || strstr(name, "memfd") ||
-	       strstr(name, "dmabuf") || strstr(name, "gralloc") ||
-	       strstr(name, "dma_heap");
+	if (vma->vm_file->f_path.dentry->d_parent)
+		parent = vma->vm_file->f_path.dentry->d_parent->d_name.name;
+	if (strstr(name, "ashmem") || strstr(name, "memfd") ||
+	    strstr(name, "dmabuf") || strstr(name, "gralloc") ||
+	    strstr(name, "dma_heap"))
+		return true;
+	/* /dev/dma_heap/system and similar: the dentry basename is "system",
+	 * the parent directory is what identifies the dma-heap mapping. */
+	return parent && (strstr(parent, "dma_heap") ||
+			  strstr(parent, "dmabuf") ||
+			  strstr(parent, "gralloc"));
 }
 
 static struct task_struct *dfm_gyro_direct_get_task(pid_t tgid)
