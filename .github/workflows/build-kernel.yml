@@ -64,8 +64,11 @@ jobs:
             set -euo pipefail
             set -x
             if ! make -j"$(nproc)" KDIR="${KERNEL_SRC:?KERNEL_SRC is not set}" 2>&1 | tee /tmp/make.log; then
-              grep -nE "error:|Error [0-9]+|undefined reference" /tmp/make.log | tail -30 | while IFS= read -r line; do
+              grep -nE "error:|Error [0-9]+|undefined reference|duplicate symbol" /tmp/make.log | tail -40 | while IFS= read -r line; do
                 echo "::error::$line"
+              done
+              grep -n -B6 -A6 "duplicate symbol" /tmp/make.log | while IFS= read -r line; do
+                echo "::error::ctx $line"
               done
               exit 1
             fi
