@@ -9,7 +9,6 @@
 #include <linux/string.h>
 #include <linux/version.h>
 
-#include "compat.h"
 #include "sf_avc.h"
 
 #ifndef __nocfi
@@ -19,6 +18,9 @@
 #if defined(CONFIG_SECURITY_SELINUX) && defined(CONFIG_KRETPROBES)
 /* Use the target kernel's declarations, including its gfp_t/CFI types. */
 #include "avc.h"
+#endif
+
+#include "compat.h"
 
 static const char sf_context[] = "u:r:surfaceflinger:s0";
 static u32 sf_sid;
