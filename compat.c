@@ -57,7 +57,6 @@ int (*dfm_groups_search)(const struct group_info *group_info, kgid_t grp);
 void (*dfm_groups_sort)(struct group_info *group_info);
 int (*dfm_set_current_groups)(struct group_info *group_info);
 struct mm_struct *dfm_init_mm;
-struct pid *(*dfm_get_pid)(struct pid *pid);
 void (*dfm_put_pid)(struct pid *pid);
 struct pid *(*dfm_find_vpid)(int nr);
 struct task_struct *(*dfm_pid_task)(struct pid *pid, enum pid_type type);
@@ -104,7 +103,6 @@ static const struct dfm_compat_symbol dfm_compat_symbols[] = {
 	{ "groups_sort", (void **)&dfm_groups_sort },
 	{ "set_current_groups", (void **)&dfm_set_current_groups },
 	{ "init_mm", (void **)&dfm_init_mm },
-	{ "get_pid", (void **)&dfm_get_pid },
 	{ "put_pid", (void **)&dfm_put_pid },
 	{ "find_vpid", (void **)&dfm_find_vpid },
 	{ "pid_task", (void **)&dfm_pid_task },
