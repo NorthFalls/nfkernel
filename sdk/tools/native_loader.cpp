@@ -117,14 +117,13 @@ static_assert(kKmiTargetCount == 8, "exactly eight KMI targets are supported");
 /* ---- ANSI UI helpers (same layout as the old shell loader) ---- */
 
 static const char* const kReset = "\033[0m";
-static const char* const kDim = "\033[38;2;86;95;137m";
-static const char* const kCyan = "\033[38;2;125;207;255m";
-static const char* const kGreen = "\033[38;2;158;206;106m";
-static const char* const kYellow = "\033[38;2;224;175;104m";
-static const char* const kRed = "\033[38;2;247;118;142m";
-static const char* const kAccent = "\033[36m\033[1m";
-static const char* const kTeal = "\033[38;2;125;207;255m";
-static const char* const kWarnRed = "\033[38;2;224;108;117m";
+static const char* const kCyan = "\033[1;36m";
+static const char* const kGreen = "\033[1;32m";
+static const char* const kYellow = "\033[1;33m";
+static const char* const kRed = "\033[1;31m";
+static const char* const kMagenta = "\033[1;35m";
+static const char* const kTeal = "\033[38;2;110;195;198m";
+static const char* const kWarnRed = "\033[38;2;210;120;112m";
 
 static bool g_quiet = false;
 
@@ -151,14 +150,12 @@ static void banner() {
     std::printf("\033[2J\033[H");
     std::printf("%s<<<Welcome to NFKernel %s Driver!>>>%s\n\n", kYellow,
                 kVersion, kReset);
-    std::printf("%s", kAccent);
+    std::printf("%s", kMagenta);
     std::puts("      _  __         __  __   ____     ____");
     std::puts("     / |/ /__  ____/ /_/ /  / __/__ _/ / /");
     std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
     std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
-    std::printf("\n%s──────────────────────────────────────────────%s\n\n",
-                kDim, kReset);
     std::printf("%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
                 kYellow, kReset);
@@ -173,7 +170,7 @@ static void banner() {
 
 static bool read_choice(long* choice) {
     std::string line;
-    std::printf("\n%s[-] 请输入选项数字并回车：", kAccent);
+    std::printf("\n%s[-] 请输入选项数字并回车：", kMagenta);
     std::fflush(stdout);
 
     bool coloured = false;
@@ -849,7 +846,7 @@ static bool check_version() {
     }
     if (!g_quiet)
         std::printf("%s[√] 驱动版本验证通过,当前已是最新版本!%s\n",
-                    kAccent, kReset);
+                    kMagenta, kReset);
     return true;
 }
 
@@ -1383,7 +1380,7 @@ static int load_kmi(const char* kmi, const std::string& params,
         }
         std::printf("%s[x] 内核模块加载失败!%s\n", kRed, kReset);
         if (stage == kLoadFinit && capture_failure_logs())
-            std::printf("%s[-] 已打印dmesg日志!%s\n", kAccent, kReset);
+            std::printf("%s[-] 已打印dmesg日志!%s\n", kMagenta, kReset);
         return kExitFailure;
     }
     if (!is_module_loaded()) {
@@ -1467,9 +1464,9 @@ static void show_menu(const SeriesGroup* groups, size_t group_count,
         const char* count_text =
             groups[i].count == 1 ? "一" : groups[i].count == 2 ? "二" : "多";
         std::printf("%s[%zu] 内核版本：%-6s        （%s个子方案）%s\n",
-                    kAccent, i + 1, groups[i].series, count_text, kReset);
+                    kMagenta, i + 1, groups[i].series, count_text, kReset);
     }
-    std::printf("%s[%zu] 退出程序%s\n", kAccent, group_count + 1, kReset);
+    std::printf("%s[%zu] 退出程序%s\n", kMagenta, group_count + 1, kReset);
 }
 
 static int run_menu(const std::string& /*release*/, int detected,
@@ -1480,8 +1477,6 @@ static int run_menu(const std::string& /*release*/, int detected,
     for (;;) {
         std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n",
                     kYellow, kReset);
-        std::printf("%s──────────────────────────────────────────────%s\n\n",
-                    kDim, kReset);
         show_menu(groups, group_count, detected);
         long choice = 0;
         if (!read_choice(&choice)) {
@@ -1498,10 +1493,10 @@ static int run_menu(const std::string& /*release*/, int detected,
         if (group.count == 1)
             return load_kmi(kKmiTargets[group.first].kmi, params, true);
 
-        std::printf("\n%s[-] 请选择%s内核的子方案：%s\n", kAccent,
+        std::printf("\n%s[-] 请选择%s内核的子方案：%s\n", kMagenta,
                     group.series, kReset);
         for (size_t j = 0; j < group.count; ++j)
-            std::printf("%s[%zu] 安卓%d方案%s\n", kAccent, j + 1,
+            std::printf("%s[%zu] 安卓%d方案%s\n", kMagenta, j + 1,
                         kKmiTargets[group.first + j].android, kReset);
         long sub = 0;
         if (!read_choice(&sub)) {
@@ -1670,7 +1665,7 @@ int main(int argc, char** argv) {
 
     if (!g_quiet)
         std::printf("%s[-] 正在向服务器验证驱动版本请稍后...%s\n",
-                    kAccent, kReset);
+                    kMagenta, kReset);
     if (!check_version())
         return kExitFailure;
 
