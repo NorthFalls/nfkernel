@@ -574,9 +574,13 @@ static int __init mod_init(void)
         pr_warn("file I/O unavailable: %d\n", ret);
 
     dfm_init_mark("4 fileio-done\n");
-    /* SAFE BUILD: newest init-time SF AVC kretprobe disabled while isolating
-     * the load-time reboot. */
-    dfm_init_mark("4b sfavc-skipped\n");
+    ret = dfm_sf_avc_init();
+    if (ret < 0)
+        /* Core clients remain usable; SF startup requires the active-probe
+         * capability and reports the normal reboot-required message. */
+        pr_warn("SurfaceFlinger AVC capability unavailable: %d\n", ret);
+
+    dfm_init_mark("5 sfavc-done\n");
     syscall_ret = syscall_hook_init();
     if (syscall_ret < 0) {
         /* The kprobe on reboot can observe but cannot suppress the reboot
@@ -612,8 +616,14 @@ static int __init mod_init(void)
     /* Keep the loader-owned objects alive while sysfs is detached. Explicit
      * unload preparation restores them before releasing the lifetime pin. */
     dfm_init_mark("8 kgsl-done\n");
-    /* SAFE BUILD: keep module sysfs visible; no detach, no lifetime pin. */
-    dfm_init_mark("9 sysfs-skipped\n");
+    /* Keep the loader-owned objects alive while sysfs is detached. Explicit
+     * unload preparation restores them before releasing the lifetime pin. */
+    __module_get(THIS_MODULE);
+    dfm_init_mark("9 module-get\n");
+    ret = dfm_module_sysfs_detach();
+    if (ret)
+        pr_warn("module sysfs detach unavailable: %d\n", ret);
+    dfm_init_mark("10 sysfs-done\n");
     set_install_admission(true);
     dfm_init_mark("done\n");
     dfm_init_mark_close();
