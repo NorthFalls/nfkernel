@@ -171,7 +171,7 @@ static bool dfm_gyro_range_has_event(struct task_struct *task,
 	n = dfm_access_process_vm(task, start, buf, (int)len, 0);
 	if (n >= (int)DFM_GYRO_EVENT_SIZE) {
 		for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n;
-		     off += 4) {
+		     off += DFM_GYRO_EVENT_SIZE) {
 			u32 version, sensor, type;
 			u64 timestamp;
 
@@ -267,7 +267,7 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 	if (n < (int)DFM_GYRO_EVENT_SIZE)
 		return -EFAULT;
 
-	for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n; off += 4) {
+	for (off = 0; off + DFM_GYRO_EVENT_SIZE <= (unsigned long)n; off += DFM_GYRO_EVENT_SIZE) {
 		u32 version, sensor, type;
 		u64 timestamp, xy;
 
@@ -295,12 +295,12 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 static void dfm_gyro_direct_work_fn(struct work_struct *work)
 {
 	void *buf = (void *)READ_ONCE(dfm_gyro_direct_buf);
+	int events = 0;
 
 	if (!READ_ONCE(dfm_gyro_direct_active) ||
 	    !READ_ONCE(dfm_gyro_enabled))
 		return;
 	if (buf && dfm_gyro_direct_task) {
-		int events = 0;
 		int ret;
 
 		ret = dfm_gyro_direct_scan_range(dfm_gyro_direct_task,
@@ -316,7 +316,8 @@ static void dfm_gyro_direct_work_fn(struct work_struct *work)
 	}
 	if (READ_ONCE(dfm_gyro_direct_active))
 		schedule_delayed_work(&dfm_gyro_direct_work,
-				      msecs_to_jiffies(DFM_GYRO_DIRECT_INTERVAL_MS));
+				      msecs_to_jiffies(events ?
+					DFM_GYRO_DIRECT_INTERVAL_MS : 100));
 }
 
 static void dfm_gyro_direct_stop(void)
@@ -696,6 +697,7 @@ long dfm_gyro_ioctl(void __user *arg)
 {
 	struct dfm_gyro_req req;
 	long ret = 0;
+	bool same_target = false;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -711,10 +713,21 @@ long dfm_gyro_ioctl(void __user *arg)
 			ret = -EINVAL;
 			break;
 		}
-		dfm_gyro_direct_stop();
-		WRITE_ONCE(dfm_gyro_tgid, req.pid);
+		/* gyro_update() calls SET repeatedly with the same target.  Keep
+		 * the existing probes/direct worker alive and only change x/y;
+		 * otherwise every update would cancel and rescan the queue. */
+		same_target = READ_ONCE(dfm_gyro_tgid) == req.pid &&
+			      READ_ONCE(dfm_gyro_enabled) &&
+			      READ_ONCE(dfm_gyro_registered);
 		WRITE_ONCE(dfm_gyro_x_bits, req.x_bits);
 		WRITE_ONCE(dfm_gyro_y_bits, req.y_bits);
+		if (same_target) {
+			if (!READ_ONCE(dfm_gyro_direct_active))
+				(void)dfm_gyro_direct_start(req.pid);
+			break;
+		}
+		dfm_gyro_direct_stop();
+		WRITE_ONCE(dfm_gyro_tgid, req.pid);
 		WRITE_ONCE(dfm_gyro_sample_count, 0);
 		memset(dfm_gyro_samples, 0, sizeof(dfm_gyro_samples));
 		WRITE_ONCE(dfm_gyro_enabled, true);
