@@ -659,6 +659,13 @@ long syscall_cpu_clock_set_target(void __user *arg)
     if (req.pid < 0)
         return -EINVAL;
 
+    if (g_cpu_clock_status == -EOPNOTSUPP) {
+        int init_ret = syscall_cpu_clock_init();
+
+        if (init_ret)
+            return init_ret;
+    }
+
     mutex_lock(&g_cpu_clock_mutex);
     if (req.pid) {
         if (g_cpu_clock_status) {

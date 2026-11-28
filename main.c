@@ -571,10 +571,10 @@ static int __init mod_init(void)
         g_reboot_kprobe_registered = 1;
     }
 
-    ret = syscall_cpu_clock_init();
-    if (ret < 0)
-        pr_warn("CPU-clock mitigation unavailable: %d\n", ret);
-
+    /* CPU-clock hooks patch live clock_gettime slots. Do that lazily from
+     * the SET_TARGET ioctl: a second stop_machine text patch during
+     * finit_module is the difference from the known-good build and can
+     * watchdog/reboot the phone before userspace even starts. */
     (void)kgsl_hide_init();
 
     /* Keep the loader-owned objects alive while sysfs is detached. Explicit
