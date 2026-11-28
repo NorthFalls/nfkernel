@@ -116,7 +116,6 @@ int dfm_sf_avc_init(void)
         return 0;
     ret = sf_resolve_sid(&sid);
     if (ret) {
-        pr_err("cannot resolve %s: %d\n", sf_context, ret);
         return ret;
     }
     WRITE_ONCE(sf_sid, sid);
@@ -130,7 +129,6 @@ int dfm_sf_avc_init(void)
     ret = register_kretprobe(&sf_probe);
     if (ret) {
         WRITE_ONCE(sf_sid, 0);
-        pr_err("avc_denied probe registration failed: %d\n", ret);
         return ret;
     }
     WRITE_ONCE(sf_registered, true);
@@ -143,9 +141,6 @@ void dfm_sf_avc_exit(void)
         return;
     WRITE_ONCE(sf_registered, false);
     unregister_kretprobe(&sf_probe);
-    if (sf_probe.nmissed || sf_probe.kp.nmissed)
-        pr_warn("missed return=%d entry=%lu; original decisions retained\n",
-                sf_probe.nmissed, sf_probe.kp.nmissed);
     WRITE_ONCE(sf_sid, 0);
 }
 
