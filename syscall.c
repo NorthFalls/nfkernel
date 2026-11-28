@@ -319,12 +319,12 @@ int syscall_hook_init(void)
     return install_ret;
 }
 
-void syscall_hook_exit(void)
+int syscall_hook_exit(void)
 {
     int ret;
 
     if (!g_sys_call_table)
-        return;
+        return 0;
 
     if (g_hooked_nr >= 0 && g_orig_syscall) {
         int attempt;
@@ -343,7 +343,7 @@ void syscall_hook_exit(void)
         }
         if (ret) {
             pr_err("failed to restore syscall nr %d: %d\n", g_hooked_nr, ret);
-            return;
+            return 0;
         }
     }
 
@@ -732,7 +732,7 @@ out:
     return ret;
 }
 
-void syscall_cpu_clock_exit(void)
+int syscall_cpu_clock_exit(void)
 {
     struct pid *old;
 
