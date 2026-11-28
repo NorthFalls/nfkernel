@@ -40,6 +40,7 @@
 #include "file_observer.h"
 #include "compat.h"
 #include "module_sysfs.h"
+#include "gyro_ctl.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("DFM");
@@ -578,11 +579,15 @@ static int __init mod_init(void)
     (void)ret;
     set_install_admission(true);
 
+    /* nfkernel-only gyro feature; not part of the enenkernel ABI. */
+    (void)nfk_gyro_init();
+
     return 0;
 }
 
 static void __exit mod_exit(void)
 {
+	nfk_gyro_exit();
     /* The preparation pin permits entry only after all detachable hooks
      * that can fail to restore have been drained. */
     dfm_sf_avc_exit();
