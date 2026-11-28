@@ -99,7 +99,10 @@ static int dfm_gyro_read32(struct iovec *iov, unsigned int n,
 
 		if (len > ULONG_MAX - base)
 			return -EFAULT;
-		if (off < base + len) {
+		/* A 4-byte field must fit entirely inside one iovec segment;
+		 * segments are not guaranteed to be contiguous in user memory. */
+		if (len >= sizeof(val) && off >= base &&
+		    off - base <= len - sizeof(val)) {
 			if (dfm_gyro_copy_from_user(&val,
 					(u32 __user *)((char __user *)iov[i].iov_base +
 						       (off - base)), sizeof(val)))
@@ -123,13 +126,33 @@ static int dfm_gyro_write32(struct iovec *iov, unsigned int n,
 
 		if (len > ULONG_MAX - base)
 			return -EFAULT;
-		if (off < base + len)
+		if (len >= sizeof(val) && off >= base &&
+		    off - base <= len - sizeof(val))
 			return dfm_gyro_copy_to_user(
 				(u32 __user *)((char __user *)iov[i].iov_base +
 					       (off - base)), &val, sizeof(val));
 		base += len;
 	}
 	return -EFAULT;
+}
+
+static bool dfm_gyro_has32(struct iovec *iov, unsigned int n,
+			   unsigned long off)
+{
+	unsigned int i;
+	unsigned long base = 0;
+
+	for (i = 0; i < n; i++) {
+		unsigned long len = iov[i].iov_len;
+
+		if (len > ULONG_MAX - base)
+			return false;
+		if (len >= sizeof(u32) && off >= base &&
+		    off - base <= len - sizeof(u32))
+			return true;
+		base += len;
+	}
+	return false;
 }
 
 static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
@@ -150,6 +173,11 @@ static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
 		    (type == DFM_GYRO_TYPE_CAL || type == DFM_GYRO_TYPE_UNCAL))
 			found = true;
 		if (!found)
+			continue;
+		/* Both x and y must be fully inside single iovec segments before
+		 * any write, otherwise a failed second write could leave x modified. */
+		if (!dfm_gyro_has32(iov, n, off + DFM_GYRO_DATA_OFF) ||
+		    !dfm_gyro_has32(iov, n, off + DFM_GYRO_DATA_OFF + 4))
 			continue;
 
 		atomic64_inc(&dfm_gyro_processed);
@@ -247,6 +275,9 @@ static int dfm_gyro_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	ret = (long)regs_return_value(regs);
 	if (ret <= 0)
+		return 0;
+	/* DISABLE may race an in-flight syscall; don't rewrite after disable. */
+	if (!READ_ONCE(dfm_gyro_enabled))
 		return 0;
 	total = (unsigned long)ret;
 
