@@ -16,13 +16,11 @@
  */
 
 #ifndef __aarch64__
-#error "nf kernel module requires ARM64"
+#error "DFM kernel module requires ARM64"
 #endif
 
 #include <linux/bitmap.h>
 #include <linux/build_bug.h>
-#include <linux/cred.h>
-#include <linux/capability.h>
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 #include <linux/errno.h>
@@ -30,8 +28,8 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/kallsyms.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
@@ -54,7 +52,6 @@
 
 #include "abi.h"
 #include "dfm_hwb.h"
-#include "compat.h"
 
 #ifndef __nocfi
 #define __nocfi __attribute__((no_sanitize("cfi")))
@@ -84,11 +81,8 @@
 struct dfm_hwb_session {
     int configured;
     int hooks_installed;
-    int hooks_ref;                /* module reference held while text is patched */
     int target_tid;
-    struct task_struct *target;   /* pinned at SET time: TIDs are recycled */
     uint64_t generation;
-    uint64_t sav_gen;             /* generation the per-CPU backups belong to */
     struct file *owner;
     uint32_t point_count;
     uint32_t used_brps;
@@ -98,18 +92,10 @@ struct dfm_hwb_session {
     int active_snapshot;
 };
 
-/* Debug-register capture is cross-process introspection. The control fd is
- * already restricted to uid<=1000 by the install gate in main.c, so keep that
- * same boundary here instead of locking out system-uid clients; also accept
- * CAP_SYS_PTRACE (init userns) for privileged callers. */
-static bool dfm_hwb_may_ptrace(void)
-{
-    return capable(CAP_SYS_PTRACE) || current_uid().val <= 1000;
-}
-
 static DEFINE_MUTEX(g_hwb_mutex);
 static DEFINE_SPINLOCK(g_hwb_lock);
 static struct dfm_hwb_session g_hwb;
+static bool g_hwb_cleanup_pinned;
 static atomic_t g_hwb_finish_returns_inflight = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE_HEAD(g_hwb_finish_return_wait);
 
@@ -363,11 +349,11 @@ static void dfm_hwb_enable_cpu(void)
                  "msr mdscr_el1, %[val]\n\t"
                  "isb\n\t"
                  : [val] "=&r"(mdscr)
-                 : [mask] "r"((uint64_t)(1UL << 15))
+                 : [mask] "r"((uint64_t)((1UL << 15) | (1UL << 13)))
                  : "memory");
 }
 
-static void __maybe_unused dfm_hwb_disable_cpu(void)
+static void dfm_hwb_disable_cpu(void)
 {
     uint64_t mdscr;
 
@@ -376,7 +362,7 @@ static void __maybe_unused dfm_hwb_disable_cpu(void)
                  "msr mdscr_el1, %[val]\n\t"
                  "isb\n\t"
                  : [val] "=&r"(mdscr)
-                 : [mask] "r"((uint64_t)(1UL << 15))
+                 : [mask] "r"((uint64_t)((1UL << 15) | (1UL << 13)))
                  : "memory");
 
     asm volatile("mov x0, #1\n\t"
@@ -587,7 +573,6 @@ static int __nocfi dfm_hwb_patch_words(uint32_t *dst, const uint32_t *src, int c
 {
     void *addrs[120];
     int i;
-    int ret;
 
     if (count <= 0 || count > (int)(sizeof(addrs) / sizeof(addrs[0])))
         return -EINVAL;
@@ -601,12 +586,7 @@ static int __nocfi dfm_hwb_patch_words(uint32_t *dst, const uint32_t *src, int c
     for (i = 0; i < count; i++)
         addrs[i] = &dst[i];
 
-    /* aarch64_insn_patch_text() reaches stop_machine_cpuslocked(), whose
-     * callers must hold cpus_read_lock (see kernel/kprobes.c arm_kprobe()). */
-    cpus_read_lock();
-    ret = g_hwb_patch_text(addrs, (uint32_t *)src, count);
-    cpus_read_unlock();
-    return ret;
+    return g_hwb_patch_text(addrs, (uint32_t *)src, count);
 }
 
 #define DFM_HOOK_STUB_WORDS 4
@@ -753,19 +733,6 @@ static void dfm_hwb_trampoline_build(uint32_t *buf,
     memcpy(&buf[DFM_TRAMP_WORK_SLOT_INDEX], &work_fn, sizeof(uint64_t));
 }
 
-/* The stub relocates the first four instructions into a trampoline; PC-relative
- * encodings (b/bl, b.cond, cbz/cbnz, tbz/tbnz, adr/adrp, literal loads) would
- * compute their target from the wrong PC there. */
-static bool dfm_hwb_insn_is_pc_relative(uint32_t insn)
-{
-    return (insn & 0x7C000000u) == 0x14000000u ||   /* b / bl       */
-           (insn & 0xFF000010u) == 0x54000000u ||   /* b.cond       */
-           (insn & 0x7E000000u) == 0x34000000u ||   /* cbz / cbnz   */
-           (insn & 0x7E000000u) == 0x36000000u ||   /* tbz / tbnz   */
-           (insn & 0x1F000000u) == 0x10000000u ||   /* adr / adrp   */
-           (insn & 0x3B000000u) == 0x18000000u;     /* ldr/ldrsw/prfm literal */
-}
-
 static int dfm_hwb_hook_install_one(struct dfm_hwb_hook_entry *entry)
 {
     uint32_t tramp_code[DFM_TRAMP_WORDS];
@@ -785,22 +752,6 @@ static int dfm_hwb_hook_install_one(struct dfm_hwb_hook_entry *entry)
     if (!entry->target_addr || !entry->work_fn)
         return -EINVAL;
 
-    {
-        static unsigned long hwb_stext, hwb_etext;
-
-        if (!hwb_stext) {
-            hwb_stext = (unsigned long)dfm_hwb_lookup_symbol("_stext");
-            hwb_etext = (unsigned long)dfm_hwb_lookup_symbol("_etext");
-        }
-        /* patch_map() BUG_ONs on unmapped addresses and the stub's literal
-         * load requires 8-byte alignment, so validate before touching text. */
-        if (!hwb_stext || hwb_etext <= hwb_stext ||
-            entry->target_addr < hwb_stext ||
-            entry->target_addr + DFM_HOOK_STUB_BYTES > hwb_etext ||
-            !IS_ALIGNED(entry->target_addr, 8))
-            return -EINVAL;
-    }
-
     slot = dfm_hwb_slot_alloc(&entry->trampoline);
     if (slot < 0)
         return slot;
@@ -809,14 +760,6 @@ static int dfm_hwb_hook_install_one(struct dfm_hwb_hook_entry *entry)
     for (i = 0; i < DFM_HOOK_STUB_WORDS; i++)
         entry->saved_insn[i] = READ_ONCE(*(uint32_t *)(uintptr_t)
                                          (entry->target_addr + i * 4));
-    for (i = 0; i < DFM_HOOK_STUB_WORDS; i++) {
-        if (dfm_hwb_insn_is_pc_relative(entry->saved_insn[i])) {
-            dfm_hwb_slot_free(slot);
-            entry->slot_index = -1;
-            entry->trampoline = NULL;
-            return -EOPNOTSUPP;
-        }
-    }
 
     return_addr = entry->target_addr + DFM_HOOK_STUB_BYTES;
     dfm_hwb_trampoline_build(tramp_code, entry->saved_insn,
@@ -829,15 +772,11 @@ static int dfm_hwb_hook_install_one(struct dfm_hwb_hook_entry *entry)
     dfm_hwb_make_ldr_ret((uint64_t)entry->trampoline, hook_code);
     ret = dfm_hwb_patch_words((uint32_t *)(uintptr_t)entry->target_addr,
                               hook_code, DFM_HOOK_STUB_WORDS);
-    if (ret)
-        goto out_restore;
-
+    /* Even a failed patch may have changed part of the entry. Keep the
+     * trampoline reserved until the original instructions are restored. */
     entry->installed = 1;
-    return 0;
+    return ret;
 
-out_restore:
-    dfm_hwb_patch_words((uint32_t *)(uintptr_t)entry->target_addr,
-                        entry->saved_insn, DFM_HOOK_STUB_WORDS);
 out_slot:
     dfm_hwb_slot_free(slot);
     entry->slot_index = -1;
@@ -847,18 +786,17 @@ out_slot:
 
 static int dfm_hwb_hook_remove_one(struct dfm_hwb_hook_entry *entry)
 {
+    int ret;
+
     if (!entry->installed)
         return 0;
 
-    /* If the original instructions cannot be written back, the patched entry
-     * still branches into this module. Keep the hook marked installed so the
-     * caller does not release the module with a dangling branch target. */
-    if (dfm_hwb_patch_words((uint32_t *)(uintptr_t)entry->target_addr,
-                           entry->saved_insn, DFM_HOOK_STUB_WORDS)) {
-        pr_err("hwb: failed to restore %s, hook kept installed\n",
-               entry->target_sym ? entry->target_sym : "?");
-        return -EIO;
-    }
+    ret = dfm_hwb_patch_words((uint32_t *)(uintptr_t)entry->target_addr,
+                              entry->saved_insn, DFM_HOOK_STUB_WORDS);
+    if (ret)
+        return ret;
+    /* Drain nonpreemptible entries before reusing the trampoline. */
+    synchronize_rcu();
     dfm_hwb_slot_free(entry->slot_index);
     entry->slot_index = -1;
     entry->trampoline = NULL;
@@ -873,25 +811,22 @@ static int dfm_hwb_hook_install_many(struct dfm_hwb_hook_entry *entries, int cou
 
     for (i = 0; i < count; i++) {
         ret = dfm_hwb_hook_install_one(&entries[i]);
-        if (ret) {
-            while (--i >= 0)
-                dfm_hwb_hook_remove_one(&entries[i]);
+        if (ret)
             return ret;
-        }
     }
     return 0;
 }
 
 static int dfm_hwb_hook_remove_many(struct dfm_hwb_hook_entry *entries, int count)
 {
-    int i;
-    int failures = 0;
+    int i, ret, first_error = 0;
 
     for (i = count - 1; i >= 0; i--) {
-        if (dfm_hwb_hook_remove_one(&entries[i]))
-            failures++;
+        ret = dfm_hwb_hook_remove_one(&entries[i]);
+        if (ret && !first_error)
+            first_error = ret;
     }
-    return failures;
+    return first_error;
 }
 
 #define DFM_HWB_HOOK(sym, fn)               \
@@ -1171,7 +1106,7 @@ static void dfm_hwb_mark_local_slots_locked(struct dfm_hwb_slots_req *req)
 
         if ((slot->flags & DFM_HWB_SLOT_F_OCCUPIED) &&
             slot->addr == addr && slot->ctrl == (ctrl | 0x1ULL))
-            slot->flags |= DFM_HWB_SLOT_F_NF;
+            slot->flags |= DFM_HWB_SLOT_F_DFM;
     }
 }
 
@@ -1316,7 +1251,7 @@ static void dfm_hwb_correlate_perf_slots(struct dfm_hwb_slots_req *req)
     }
 }
 
-static void __maybe_unused dfm_hwb_clear_cpu_slots(uint32_t used_brps, uint32_t used_wrps)
+static void dfm_hwb_clear_cpu_slots(uint32_t used_brps, uint32_t used_wrps)
 {
     uint32_t i;
 
@@ -1334,126 +1269,15 @@ struct dfm_hwb_cpu_clear_arg {
     uint32_t used_brps;
     uint32_t used_wrps;
     int disable_debug;
-    u64 generation;
 };
-
-static void dfm_hwb_clear_matching_current_cpu_locked(u64 generation);
 
 static void dfm_hwb_clear_cpu_cb(void *data)
 {
     struct dfm_hwb_cpu_clear_arg *arg = data;
-    unsigned long flags;
 
-    /* Only clear slots that still hold exactly our programmed address/control.
-     * Blindly zeroing every slot would wipe this CPU's kernel perf/ptrace
-     * watchpoints, whose bookkeeping lives in bp_on_reg[]/wp_on_reg[]. */
-    spin_lock_irqsave(&g_hwb_lock, flags);
-    dfm_hwb_clear_matching_current_cpu_locked(arg->generation);
-    spin_unlock_irqrestore(&g_hwb_lock, flags);
-}
-
-/* Copy of the debug slots this session displaced, one entry per CPU. The
- * kernel's hw_breakpoint layer keeps its own bookkeeping (bp_on_reg[]/
- * wp_on_reg[]) and only toggles the enable bit, so overwriting a slot without
- * restoring the original address/control silently kills a ptrace/perf
- * breakpoint. Deliberately NOT DEFINE_PER_CPU: some vendor kernels fail the
- * whole module load with "Could not allocate N bytes percpu data" (-ENOMEM)
- * before init runs, so this is a plain CPU-indexed array instead. */
-struct dfm_hwb_sav_cpu {
-    u64 brp_a[DFM_HWB_MAX_HW_SLOTS];
-    u64 brp_c[DFM_HWB_MAX_HW_SLOTS];
-    u64 wrp_a[DFM_HWB_MAX_HW_SLOTS];
-    u64 wrp_c[DFM_HWB_MAX_HW_SLOTS];
-    u32 mask;
-    u64 gen;
-};
-
-static struct dfm_hwb_sav_cpu *g_hwb_sav;
-
-/* Called with g_hwb_mutex held. */
-static int dfm_hwb_sav_alloc_locked(void)
-{
-    if (g_hwb_sav)
-        return 0;
-    /* dfm_hwb_sav_current() indexes with smp_processor_id(), whose maximum is
-     * nr_cpu_ids - 1. num_possible_cpus() only matches that while
-     * cpu_possible_mask is contiguous from 0 (a disabled middle CPU makes it
-     * sparse), so size by nr_cpu_ids to avoid an out-of-bounds write. */
-    g_hwb_sav = kvzalloc(sizeof(*g_hwb_sav) * nr_cpu_ids, GFP_KERNEL);
-    return g_hwb_sav ? 0 : -ENOMEM;
-}
-
-static void dfm_hwb_sav_free_locked(void)
-{
-    kvfree(g_hwb_sav);
-    g_hwb_sav = NULL;
-}
-
-/* Callers hold g_hwb_lock (IRQs off), so the CPU id is stable. */
-static struct dfm_hwb_sav_cpu *dfm_hwb_sav_current(void)
-{
-    if (!g_hwb_sav)
-        return NULL;
-    return &g_hwb_sav[smp_processor_id()];
-}
-
-static void dfm_hwb_save_slots_current_cpu(void)
-{
-    struct dfm_hwb_sav_cpu *sav = dfm_hwb_sav_current();
-    uint32_t i;
-
-    if (!sav)
-        return;
-    if (sav->gen != g_hwb.generation) {
-        /* New session: drop the previous session's stale backups. */
-        sav->mask = 0;
-        sav->gen = g_hwb.generation;
-    }
-
-    /* Save per slot: a hit restores and consumes a mask bit, so the next arm
-     * of the same slot must save the kernel's value again. Skipping the whole
-     * CPU after the first arm would make later disarms write 0 over the
-     * ptrace/perf breakpoints this mechanism exists to preserve. */
-    for (i = 0; i < g_hwb.used_brps && i < DFM_HWB_MAX_HW_SLOTS; i++) {
-        if (sav->mask & (1U << i))
-            continue;
-        sav->brp_a[i] = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_BVR, (int)i);
-        sav->brp_c[i] = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_BCR, (int)i);
-        sav->mask |= 1U << i;
-    }
-    for (i = 0; i < g_hwb.used_wrps && i < DFM_HWB_MAX_HW_SLOTS; i++) {
-        if (sav->mask & (1U << (16 + i)))
-            continue;
-        sav->wrp_a[i] = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_WVR, (int)i);
-        sav->wrp_c[i] = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_WCR, (int)i);
-        sav->mask |= 1U << (16 + i);
-    }
-}
-
-static void dfm_hwb_restore_slot_current_cpu(int is_exec, uint32_t slot,
-                                            u64 generation)
-{
-    struct dfm_hwb_sav_cpu *sav = dfm_hwb_sav_current();
-    u32 bit = 1U << (slot + (is_exec ? 0 : 16));
-
-    if (sav && sav->gen == generation && (sav->mask & bit)) {
-        if (is_exec) {
-            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BVR, (int)slot, sav->brp_a[slot]);
-            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BCR, (int)slot, sav->brp_c[slot]);
-        } else {
-            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WVR, (int)slot, sav->wrp_a[slot]);
-            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WCR, (int)slot, sav->wrp_c[slot]);
-        }
-        sav->mask &= ~bit;
-        return;
-    }
-    if (is_exec) {
-        dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BCR, (int)slot, 0);
-        dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BVR, (int)slot, 0);
-    } else {
-        dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WCR, (int)slot, 0);
-        dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WVR, (int)slot, 0);
-    }
+    dfm_hwb_clear_cpu_slots(arg->used_brps, arg->used_wrps);
+    if (arg->disable_debug)
+        dfm_hwb_disable_cpu();
 }
 
 static void dfm_hwb_install_current_cpu_locked(void)
@@ -1466,7 +1290,6 @@ static void dfm_hwb_install_current_cpu_locked(void)
         return;
 
     dfm_hwb_enable_cpu();
-    dfm_hwb_save_slots_current_cpu();
 
     for (i = 0; i < g_hwb.point_count; i++) {
         uint64_t addr;
@@ -1495,13 +1318,13 @@ static void dfm_hwb_install_current_cpu_locked(void)
 static void dfm_hwb_refresh_cpu_cb(void *data)
 {
     unsigned long flags;
-    (void)data;
+    int target_tid = *(int *)data;
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    if (g_hwb.configured && current == READ_ONCE(g_hwb.target))
+    if (g_hwb.configured && current->pid == target_tid)
         dfm_hwb_install_current_cpu_locked();
     else
-        dfm_hwb_clear_matching_current_cpu_locked(READ_ONCE(g_hwb.generation));
+        dfm_hwb_clear_cpu_slots(g_hwb.used_brps, g_hwb.used_wrps);
     spin_unlock_irqrestore(&g_hwb_lock, flags);
 }
 
@@ -1528,14 +1351,10 @@ static void dfm_hwb_record_hit(uint32_t point_index, uint64_t hit_addr,
     rec.sp = regs->sp;
     rec.pstate = regs->pstate;
     memcpy(rec.x, regs->regs, sizeof(rec.x));
-    /* If the hardware holds another task's FP state (TIF_FOREIGN_FPSTATE),
-     * reading q0-q31 would capture that task's registers: leave them zero. */
-    if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
-        rec.fpsr = dfm_hwb_read_fpsr();
-        rec.fpcr = dfm_hwb_read_fpcr();
-        for (i = 0; i < 32; i++)
-            dfm_hwb_read_q_reg(i, rec.q[i]);
-    }
+    rec.fpsr = dfm_hwb_read_fpsr();
+    rec.fpcr = dfm_hwb_read_fpcr();
+    for (i = 0; i < 32; i++)
+        dfm_hwb_read_q_reg(i, rec.q[i]);
 
     spin_lock_irqsave(&g_hwb_lock, flags);
 
@@ -1573,6 +1392,7 @@ static int dfm_hwb_breakpoint_work(struct pt_regs *hook_regs)
 {
     struct pt_regs *regs;
     unsigned long flags;
+    int target_tid;
     int slot;
     uint32_t i;
 
@@ -1583,12 +1403,12 @@ static int dfm_hwb_breakpoint_work(struct pt_regs *hook_regs)
     if (!regs || !user_mode(regs))
         return 0;
 
-    if (!READ_ONCE(g_hwb.configured) ||
-        current != READ_ONCE(g_hwb.target))
+    target_tid = READ_ONCE(g_hwb.target_tid);
+    if (!READ_ONCE(g_hwb.configured) || current->pid != target_tid)
         return 0;
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    if (!g_hwb.configured || current != g_hwb.target) {
+    if (!g_hwb.configured || current->pid != g_hwb.target_tid) {
         spin_unlock_irqrestore(&g_hwb_lock, flags);
         return 0;
     }
@@ -1611,11 +1431,8 @@ static int dfm_hwb_breakpoint_work(struct pt_regs *hook_regs)
                 ((slot_ctrl & ~0x1ULL) != ctrl))
                 continue;
 
-            /* Restore whatever ptrace/perf breakpoint this slot displaced
-             * instead of zeroing it: a zeroed slot no longer matches the
-             * stop-time restore, so the displaced breakpoint would be lost. */
-            dfm_hwb_restore_slot_current_cpu(1, (uint32_t)slot,
-                                            READ_ONCE(g_hwb.generation));
+            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BCR, slot, 0);
+            dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BVR, slot, 0);
             spin_unlock_irqrestore(&g_hwb_lock, flags);
 
             dfm_hwb_record_hit(i, regs->pc, regs->pc, hook_regs->regs[1], regs);
@@ -1637,6 +1454,7 @@ static int dfm_hwb_watchpoint_work(struct pt_regs *hook_regs)
     uint64_t best_dist = ~0ULL;
     int best_slot = -1;
     int best_point = -1;
+    int target_tid;
     int slot;
     uint32_t i;
 
@@ -1649,12 +1467,12 @@ static int dfm_hwb_watchpoint_work(struct pt_regs *hook_regs)
     if (!regs || !user_mode(regs))
         return 0;
 
-    if (!READ_ONCE(g_hwb.configured) ||
-        current != READ_ONCE(g_hwb.target))
+    target_tid = READ_ONCE(g_hwb.target_tid);
+    if (!READ_ONCE(g_hwb.configured) || current->pid != target_tid)
         return 0;
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    if (!g_hwb.configured || current != g_hwb.target) {
+    if (!g_hwb.configured || current->pid != g_hwb.target_tid) {
         spin_unlock_irqrestore(&g_hwb_lock, flags);
         return 0;
     }
@@ -1699,8 +1517,8 @@ static int dfm_hwb_watchpoint_work(struct pt_regs *hook_regs)
         return 0;
     }
 
-    dfm_hwb_restore_slot_current_cpu(0, (uint32_t)best_slot,
-                                    READ_ONCE(g_hwb.generation));
+    dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WCR, best_slot, 0);
+    dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WVR, best_slot, 0);
     spin_unlock_irqrestore(&g_hwb_lock, flags);
 
     dfm_hwb_record_hit((uint32_t)best_point, regs->pc, fault_addr, esr, regs);
@@ -1708,7 +1526,7 @@ static int dfm_hwb_watchpoint_work(struct pt_regs *hook_regs)
     return 1;
 }
 
-static void dfm_hwb_clear_matching_current_cpu_locked(u64 generation)
+static void dfm_hwb_clear_matching_current_cpu_locked(void)
 {
     uint32_t brp_slot = 0;
     uint32_t wrp_slot = 0;
@@ -1732,8 +1550,10 @@ static void dfm_hwb_clear_matching_current_cpu_locked(u64 generation)
             slot_ctrl = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_BCR,
                                              (int)brp_slot);
             if (slot_ctrl && slot_addr == addr &&
-                ((slot_ctrl & ~0x1ULL) == ctrl))
-                dfm_hwb_restore_slot_current_cpu(1, brp_slot, generation);
+                ((slot_ctrl & ~0x1ULL) == ctrl)) {
+                dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BCR, (int)brp_slot, 0);
+                dfm_hwb_write_dbg_reg(DFM_HWB_DBG_BVR, (int)brp_slot, 0);
+            }
             brp_slot++;
         } else {
             if (wrp_slot >= g_hwb.used_wrps)
@@ -1743,8 +1563,10 @@ static void dfm_hwb_clear_matching_current_cpu_locked(u64 generation)
             slot_ctrl = dfm_hwb_read_dbg_reg(DFM_HWB_DBG_WCR,
                                              (int)wrp_slot);
             if (slot_ctrl && slot_addr == addr &&
-                ((slot_ctrl & ~0x1ULL) == ctrl))
-                dfm_hwb_restore_slot_current_cpu(0, wrp_slot, generation);
+                ((slot_ctrl & ~0x1ULL) == ctrl)) {
+                dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WCR, (int)wrp_slot, 0);
+                dfm_hwb_write_dbg_reg(DFM_HWB_DBG_WVR, (int)wrp_slot, 0);
+            }
             wrp_slot++;
         }
     }
@@ -1774,10 +1596,10 @@ dfm_hwb_finish_task_switch_return_work(
 
     spin_lock_irqsave(&g_hwb_lock, flags);
     if (g_hwb.configured && generation == g_hwb.generation) {
-        if (current == g_hwb.target)
+        if (current->pid == g_hwb.target_tid)
             dfm_hwb_install_current_cpu_locked();
         else
-            dfm_hwb_clear_matching_current_cpu_locked(generation);
+            dfm_hwb_clear_matching_current_cpu_locked();
     }
     spin_unlock_irqrestore(&g_hwb_lock, flags);
 
@@ -1788,24 +1610,9 @@ dfm_hwb_finish_task_switch_return_work(
 static int dfm_hwb_finish_task_switch_work(struct pt_regs *hook_regs)
 {
     struct dfm_hwb_finish_return_frame *frame;
-    struct task_struct *target;
     unsigned long flags;
 
     if (!hook_regs)
-        return 0;
-
-    /* Debug registers only change on the switch that brings the target in
-     * (current == target) or takes it out (prev == target). Every other
-     * switch would otherwise build a redirect frame, take g_hwb_lock twice
-     * and scan debug registers on every CPU. regs[0]/regs[1] cover both the
-     * single-argument and (rq, prev) finish_task_switch signatures; a false
-     * positive only takes the slow path. The control plane still sweeps all
-     * CPUs in dfm_hwb_set()/dfm_hwb_stop_locked(). */
-    target = READ_ONCE(g_hwb.target);
-    if (!READ_ONCE(g_hwb.configured) ||
-        (current != target &&
-         (struct task_struct *)hook_regs->regs[0] != target &&
-         (struct task_struct *)hook_regs->regs[1] != target))
         return 0;
 
     frame = dfm_hwb_hook_frame_metadata(hook_regs);
@@ -1836,153 +1643,92 @@ static struct dfm_hwb_hook_entry g_hwb_finish_hooks[] = {
     DFM_HWB_HOOK("finish_task_switch", dfm_hwb_finish_task_switch_work),
 };
 
-/* True when any entry is still patched, including entries whose restore failed
- * and whose bookkeeping was therefore not cleared. */
-static bool dfm_hwb_any_hook_installed(void)
-{
-    return g_hwb_exception_hooks[0].installed ||
-           g_hwb_exception_hooks[1].installed ||
-           g_hwb_finish_hooks[0].installed;
-}
-
 static int dfm_hwb_hooks_install_locked(void)
 {
-    bool took_ref = false;
     int ret;
 
-    /* install_one() is idempotent, so only skip when every hook is present;
-     * after a partial restore failure the missing ones must be re-added. */
-    if (g_hwb_exception_hooks[0].installed &&
-        g_hwb_exception_hooks[1].installed &&
-        g_hwb_finish_hooks[0].installed) {
-        if (!g_hwb.hooks_ref)  /* invariant broken: never leave text unpinned */
-            return -EIO;
-        g_hwb.hooks_installed = 1;
+    if (g_hwb.hooks_installed)
         return 0;
-    }
 
-    /* Hold a reference while any kernel text branches into our trampolines:
-     * if a restore ever fails, rmmod fails with -EBUSY instead of freeing the
-     * text those branches jump to. Released only after a clean restore. */
-    if (!g_hwb.hooks_ref) {
-        if (!try_module_get(THIS_MODULE))
-            return -ENODEV;
-        g_hwb.hooks_ref = 1;
-        took_ref = true;
-    }
-
-    ret = dfm_hwb_sav_alloc_locked();
-    if (ret) {
-        if (took_ref) {
-            g_hwb.hooks_ref = 0;
-            module_put(THIS_MODULE);
-        }
-        return ret;
-    }
-
+    /* The caller tears down all published entries on a partial install. */
+    g_hwb.hooks_installed = 1;
     ret = dfm_hwb_hook_install_many(g_hwb_exception_hooks,
                                     ARRAY_SIZE(g_hwb_exception_hooks));
     if (ret)
-        goto out_partial;
+        return ret;
 
-    ret = dfm_hwb_hook_install_many(g_hwb_finish_hooks,
-                                    ARRAY_SIZE(g_hwb_finish_hooks));
-    if (ret)
-        goto out_partial;
+    return dfm_hwb_hook_install_many(g_hwb_finish_hooks,
+                                     ARRAY_SIZE(g_hwb_finish_hooks));
+}
 
-    g_hwb.hooks_installed = 1;
-    return 0;
+static int dfm_hwb_hooks_remove_locked(void)
+{
+    int ret, exception_ret;
 
-out_partial:
-    if (dfm_hwb_any_hook_installed()) {
-        g_hwb.hooks_installed = 1;
-    } else if (g_hwb.hooks_ref) {
-        g_hwb.hooks_ref = 0;
+    if (!g_hwb.hooks_installed)
+        return 0;
+
+    ret = dfm_hwb_hook_remove_many(g_hwb_finish_hooks, ARRAY_SIZE(g_hwb_finish_hooks));
+    /*
+     * finish_task_switch() runs before __schedule() reenables preemption.
+     * Wait for redirected returns and cover the assembly epilogue after
+     * its counter reaches zero.
+     */
+    if (!ret) {
+        wait_event(g_hwb_finish_return_wait,
+                   atomic_read(&g_hwb_finish_returns_inflight) == 0);
+        synchronize_rcu();
+    }
+    exception_ret = dfm_hwb_hook_remove_many(g_hwb_exception_hooks,
+                                             ARRAY_SIZE(g_hwb_exception_hooks));
+    if (!ret)
+        ret = exception_ret;
+    g_hwb.hooks_installed = ret != 0;
+    if (ret && !g_hwb_cleanup_pinned) {
+        /* The session file can close even if a hook remains reachable. */
+        __module_get(THIS_MODULE);
+        g_hwb_cleanup_pinned = true;
+        pr_err("dfm: hardware breakpoint cleanup failed: %d\n", ret);
+    } else if (!ret && g_hwb_cleanup_pinned) {
+        g_hwb_cleanup_pinned = false;
         module_put(THIS_MODULE);
     }
     return ret;
 }
 
-static void dfm_hwb_hooks_remove_locked(void)
-{
-    int failed = 0;
-
-    if (!g_hwb.hooks_installed && !dfm_hwb_any_hook_installed())
-        return;
-
-    failed += dfm_hwb_hook_remove_many(g_hwb_finish_hooks,
-                                      ARRAY_SIZE(g_hwb_finish_hooks));
-    /*
-     * finish_task_switch() runs before __schedule() reenables preemption.
-     * The grace period drains CPUs that entered the patched entry before it
-     * was restored; the counter then drains every redirected return frame.
-     */
-    synchronize_rcu();
-    wait_event(g_hwb_finish_return_wait,
-               atomic_read(&g_hwb_finish_returns_inflight) == 0);
-    failed += dfm_hwb_hook_remove_many(g_hwb_exception_hooks,
-                                      ARRAY_SIZE(g_hwb_exception_hooks));
-    if (failed) {
-        /* Keep the module pin: rmmod must not free text that is still
-         * branched into. The pin is released only by a clean restore. */
-        pr_err("hwb: %d hook(s) still patched, keeping module pinned\n",
-               failed);
-        return;
-    }
-    g_hwb.hooks_installed = 0;
-    if (g_hwb.hooks_ref) {
-        g_hwb.hooks_ref = 0;
-        module_put(THIS_MODULE);
-    }
-}
-
-static void dfm_hwb_stop_locked(void)
+static int dfm_hwb_stop_locked(void)
 {
     struct dfm_hwb_cpu_clear_arg arg;
-    struct task_struct *target;
     unsigned long flags;
-    int cpu;
+    int ret;
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    arg.generation = g_hwb.sav_gen;   /* retries must match the saved backups */
     g_hwb.generation++;
     if (!g_hwb.generation)
         g_hwb.generation = 1;
     arg.used_brps = g_hwb.used_brps;
     arg.used_wrps = g_hwb.used_wrps;
-    /* Never touch MDSCR/OSLAR here: the kernel keeps its own per-CPU debug
-     * monitor refcount and would not re-enable ptrace/perf breakpoints after
-     * we clear MDE/KDE behind its back. */
-    arg.disable_debug = 0;
+    arg.disable_debug = 1;
     g_hwb.configured = 0;
-    target = g_hwb.target;
-    g_hwb.target = NULL;
     spin_unlock_irqrestore(&g_hwb_lock, flags);
-    if (target)
-        put_task_struct(target);
 
     if (arg.used_brps || arg.used_wrps) {
-        for_each_online_cpu(cpu)
-            smp_call_function_single(cpu, dfm_hwb_clear_cpu_cb, &arg, 1);
+        cpus_read_lock();
+        on_each_cpu(dfm_hwb_clear_cpu_cb, &arg, 1);
+        cpus_read_unlock();
     }
 
-    dfm_hwb_hooks_remove_locked();
+    ret = dfm_hwb_hooks_remove_locked();
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    /* Never retain a pointer to a file that is being destroyed. A failed
-     * restore is retried from CLEAR or any control-fd close (see
-     * dfm_hwb_release_owner), which keys off hooks_installed, not owner. */
+    g_hwb.target_tid = 0;
     g_hwb.owner = NULL;
-    if (!g_hwb.hooks_installed) {
-        g_hwb.target_tid = 0;
-        g_hwb.point_count = 0;
-        g_hwb.used_brps = 0;
-        g_hwb.used_wrps = 0;
-        memset(g_hwb.points, 0, sizeof(g_hwb.points));
-    }
-    /* If a restore failed, keep points/used_* so the next stop() can still
-     * match and clear the stale slots and retry the restore. */
+    g_hwb.point_count = 0;
+    g_hwb.used_brps = 0;
+    g_hwb.used_wrps = 0;
+    memset(g_hwb.points, 0, sizeof(g_hwb.points));
     spin_unlock_irqrestore(&g_hwb_lock, flags);
+    return ret;
 }
 
 long dfm_hwb_info(void __user *arg)
@@ -2010,8 +1756,6 @@ long dfm_hwb_slots(void __user *arg)
 
     if (copy_from_user(&target_tid, arg, sizeof(target_tid)))
         return -EFAULT;
-    if (!dfm_hwb_may_ptrace())
-        return -EPERM;
     if (target_tid <= 0)
         return -EINVAL;
 
@@ -2062,38 +1806,15 @@ long dfm_hwb_set(struct file *owner, void __user *arg)
     int brps;
     int wrps;
     int ret;
-    struct task_struct *task = NULL;
     unsigned long flags;
 
     if (copy_from_user(&req, arg, sizeof(req)))
         return -EFAULT;
-    /* Cross-process instruction/data watchpoints expose another task's GPRs,
-     * stack pointer and SIMD registers: require the same capability ptrace
-     * itself requires. */
-    if (!dfm_hwb_may_ptrace())
-        return -EPERM;
     if (req.target_tid <= 0 || req.point_count == 0 ||
-        req.point_count > DFM_HWB_MAX_POINTS || req.reserved)
+        req.point_count > DFM_HWB_MAX_POINTS)
         return -EINVAL;
-    {
-        struct pid *pid = find_get_pid(req.target_tid);
-
-        if (pid) {
-            task = get_pid_task(pid, PIDTYPE_PID);
-            put_pid(pid);
-        }
-    }
-    if (!task)
+    if (!dfm_hwb_tid_alive(req.target_tid))
         return -ESRCH;
-    {
-        struct mm_struct *mm = get_task_mm(task);
-
-        if (!mm) {              /* task is exiting: it will never hit */
-            put_task_struct(task);
-            return -ESRCH;
-        }
-        mmput(mm);
-    }
 
     brps = dfm_hwb_get_brps();
     wrps = dfm_hwb_get_wrps();
@@ -2106,7 +1827,7 @@ long dfm_hwb_set(struct file *owner, void __user *arg)
         points[i] = req.points[i];
         ret = dfm_hwb_parse_point(&points[i], &addr, &ctrl, &is_exec);
         if (ret)
-            goto out_put;
+            return ret;
 
         if (is_exec)
             brps_needed++;
@@ -2114,27 +1835,27 @@ long dfm_hwb_set(struct file *owner, void __user *arg)
             wrps_needed++;
     }
 
-    if (brps_needed > (uint32_t)brps || wrps_needed > (uint32_t)wrps) {
-        ret = -ENOSPC;
-        goto out_put;
-    }
+    if (brps_needed > (uint32_t)brps || wrps_needed > (uint32_t)wrps)
+        return -ENOSPC;
 
     mutex_lock(&g_hwb_mutex);
 
-    dfm_hwb_stop_locked();
+    ret = dfm_hwb_stop_locked();
+    if (ret)
+        goto out_unlock;
 
     ret = dfm_hwb_alloc_snapshots_locked();
     if (ret)
         goto out_unlock;
 
     ret = dfm_hwb_hooks_install_locked();
-    if (ret)
+    if (ret) {
+        dfm_hwb_stop_locked();
         goto out_unlock;
+    }
 
     spin_lock_irqsave(&g_hwb_lock, flags);
     g_hwb.target_tid = req.target_tid;
-    g_hwb.target = task;
-    task = NULL;                 /* owned by the session now */
     g_hwb.owner = owner;
     g_hwb.point_count = req.point_count;
     g_hwb.used_brps = brps_needed;
@@ -2143,7 +1864,6 @@ long dfm_hwb_set(struct file *owner, void __user *arg)
     memcpy(g_hwb.points, points, sizeof(points[0]) * req.point_count);
     g_hwb.active_snapshot = 0;
     g_hwb.configured = 1;
-    g_hwb.sav_gen = g_hwb.generation;
     dfm_hwb_reset_snapshot(g_hwb.snapshots[0]);
     dfm_hwb_reset_snapshot(g_hwb.snapshots[1]);
     spin_unlock_irqrestore(&g_hwb_lock, flags);
@@ -2151,12 +1871,7 @@ long dfm_hwb_set(struct file *owner, void __user *arg)
     on_each_cpu(dfm_hwb_refresh_cpu_cb, &req.target_tid, 1);
 
 out_unlock:
-    if (ret)
-        dfm_hwb_stop_locked();
     mutex_unlock(&g_hwb_mutex);
-out_put:
-    if (task)
-        put_task_struct(task);
     return ret;
 }
 
@@ -2171,8 +1886,6 @@ long dfm_hwb_read(void __user *arg)
 
     if (copy_from_user(&req, arg, sizeof(req)))
         return -EFAULT;
-    if (!dfm_hwb_may_ptrace())
-        return -EPERM;
 
     req.out_size = sizeof(struct dfm_hwb_snapshot);
     if (!req.buf || req.buf_size < req.out_size) {
@@ -2212,16 +1925,16 @@ out_unlock:
 
 long dfm_hwb_clear(void)
 {
-    if (!dfm_hwb_may_ptrace())
-        return -EPERM;
+    int ret;
+
     mutex_lock(&g_hwb_mutex);
-    dfm_hwb_stop_locked();
+    ret = dfm_hwb_stop_locked();
     if (g_hwb.snapshots[0])
         memset(g_hwb.snapshots[0], 0, sizeof(struct dfm_hwb_snapshot));
     if (g_hwb.snapshots[1])
         memset(g_hwb.snapshots[1], 0, sizeof(struct dfm_hwb_snapshot));
     mutex_unlock(&g_hwb_mutex);
-    return 0;
+    return ret;
 }
 
 void dfm_hwb_release_owner(struct file *owner)
@@ -2233,7 +1946,7 @@ void dfm_hwb_release_owner(struct file *owner)
         return;
 
     spin_lock_irqsave(&g_hwb_lock, flags);
-    should_clear = g_hwb.configured ? (g_hwb.owner == owner) : g_hwb.hooks_installed;
+    should_clear = g_hwb.configured && g_hwb.owner == owner;
     spin_unlock_irqrestore(&g_hwb_lock, flags);
 
     if (!should_clear)
@@ -2241,7 +1954,7 @@ void dfm_hwb_release_owner(struct file *owner)
 
     mutex_lock(&g_hwb_mutex);
     spin_lock_irqsave(&g_hwb_lock, flags);
-    should_clear = g_hwb.configured ? (g_hwb.owner == owner) : g_hwb.hooks_installed;
+    should_clear = g_hwb.configured && g_hwb.owner == owner;
     spin_unlock_irqrestore(&g_hwb_lock, flags);
     if (should_clear)
         dfm_hwb_stop_locked();
@@ -2252,14 +1965,6 @@ void dfm_hwb_exit(void)
 {
     mutex_lock(&g_hwb_mutex);
     dfm_hwb_stop_locked();
-    if (g_hwb.hooks_installed || dfm_hwb_any_hook_installed()) {
-        /* Should be unreachable (the module pin keeps rmmod away); do not free
-         * anything that the still-patched entry could jump into. */
-        pr_err("hwb: hooks not restored at exit, refusing teardown\n");
-        mutex_unlock(&g_hwb_mutex);
-        return;
-    }
-    dfm_hwb_sav_free_locked();
     vfree(g_hwb.snapshots[0]);
     vfree(g_hwb.snapshots[1]);
     g_hwb.snapshots[0] = NULL;

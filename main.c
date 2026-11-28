@@ -1,13 +1,17 @@
-#define pr_fmt(fmt) fmt
-#include "dfm_log.h"
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/atomic.h>
-#include <linux/mutex.h>
+#include <linux/capability.h>
+#include <linux/completion.h>
+#include <linux/cred.h>
+#include <linux/jiffies.h>
+#include <linux/kallsyms.h>
 #include <linux/kprobes.h>
+#include <linux/mutex.h>
 #include <linux/ptrace.h>
-#include <linux/version.h>
+#include <linux/rcupdate.h>
+#include <linux/spinlock.h>
 #include <linux/anon_inodes.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
@@ -17,8 +21,7 @@
 #include <linux/task_work.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <linux/syscalls.h>
-#include <linux/kobject.h>
+#include <linux/workqueue.h>
 
 #include "abi.h"
 #include "install.h"
@@ -29,97 +32,87 @@
 #include "touch.h"
 #include "touch_v2.h"
 #include "dfm_hwb.h"
-#include "futex.h"
 #include "udp_capture.h"
 #include "file_io.h"
 #include "sf_groups.h"
+#include "sf_avc.h"
+#include "futex.h"
+#include "file_observer.h"
 #include "compat.h"
-#include "dfm_module.h"
+#include "module_sysfs.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("DFM");
 MODULE_DESCRIPTION("DFM lab debug module");
-/* enenkernel has no MODULE_VERSION; 1.8 is the loader version only. */
+
+static DEFINE_SPINLOCK(g_install_lock);
+static bool g_accept_installs;
+static unsigned int g_install_users;
+static atomic_t g_driver_files = ATOMIC_INIT(0);
+
+static void set_install_admission(bool enabled)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&g_install_lock, flags);
+    g_accept_installs = enabled;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+}
+
+static bool install_try_get(void)
+{
+    unsigned long flags;
+    bool acquired;
+
+    spin_lock_irqsave(&g_install_lock, flags);
+    acquired = g_accept_installs &&
+               READ_ONCE(THIS_MODULE->state) == MODULE_STATE_LIVE &&
+               try_module_get(THIS_MODULE);
+    if (acquired)
+        g_install_users++;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+    return acquired;
+}
+
+static void install_put(void)
+{
+    unsigned long flags;
+
+    module_put(THIS_MODULE);
+    spin_lock_irqsave(&g_install_lock, flags);
+    g_install_users--;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+}
 
 /* ---- ioctl dispatcher ---- */
 
-static long dfm_capabilities(void __user *argp)
-{
-    struct dfm_capabilities_req req;
-
-    if (copy_from_user(&req, argp, sizeof(req)))
-        return -EFAULT;
-    if (req.abi_version != DFM_CAPABILITIES_ABI_VERSION ||
-        req.reserved[0] || req.reserved[1])
-        return -EINVAL;
-    req.out_abi_version = DFM_CAPABILITIES_ABI_VERSION;
-    req.out_features = DFM_CAP_REQUIRED;
-    if (copy_to_user(argp, &req, sizeof(req)))
-        return -EFAULT;
-    return 0;
-}
-
-static bool g_mem_inited;
-static bool g_file_inited;
-
-static bool mem_feature_cmd(unsigned int cmd)
-{
-    switch (cmd) {
-    case MEM_IOC_OPEN_PROCESS_MEM:
-    case MEM_IOC_READ:
-    case MEM_IOC_READ_CACHE:
-    case MEM_IOC_READ_BATCH:
-    case MEM_IOC_GET_PID:
-    case MEM_IOC_GET_PIDS:
-    case MEM_IOC_GET_MODULE_BASE:
-    case MEM_IOC_GET_MODULE_BASE2:
-    case MEM_IOC_GET_MODULE_PATH:
-    case MEM_IOC_QUERY_MAPPING:
-    case MEM_IOC_QUERY_ACCESS:
-    case MEM_IOC_QUERY_SIGNAL:
-    case MEM_IOC_GET_TLS:
-    case MEM_IOC_GET_THREAD_TID:
-    case MEM_IOC_GET_THREAD_TIDS:
-    case MEM_IOC_GET_THREAD_STACK:
-    case MEM_IOC_EXECUTE_PACGA:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool file_feature_cmd(unsigned int cmd)
-{
-    switch (cmd) {
-    case DFM_FILE_IOC_READ:
-    case DFM_FILE_IOC_WRITE:
-    case DFM_CRED_IOC_ACQUIRE_SF_GROUPS:
-        return true;
-    default:
-        return false;
-    }
-}
+static int expose_unload_controls(void);
 
 static long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     void __user *argp = (void __user *)arg;
 
-    if (dfm_compat_missing)
-        return -EOPNOTSUPP;
-    if (!g_mem_inited && mem_feature_cmd(cmd))
-        return -EOPNOTSUPP;
-    if (!g_file_inited && file_feature_cmd(cmd))
-        return -EOPNOTSUPP;
-
     switch (cmd) {
+    case MEM_IOC_CAPABILITIES:
+        return dfm_capabilities(argp);
+    case DFM_FILE_OBSERVER_IOC_OPEN:
+        return dfm_file_observer_open(filp, argp);
+    case DFM_MODULE_IOC_EXPOSE_UNLOAD:
+        return expose_unload_controls();
+    case MEM_IOC_FUTEX_WAITERS:
+        return dfm_futex_waiters(filp, argp);
+    case MEM_IOC_FUTEX_VALIDATE:
+        return dfm_futex_validate(filp, argp);
+    case UDP_IOC_BIND_FD:
+        return udp_capture_bind_fd(argp);
+    case UDP_IOC_READ_V2:
+        return udp_capture_read_v2(argp);
     case MEM_IOC_OPEN_PROCESS_MEM:
         return mem_open_process_mem(argp);
     case MEM_IOC_READ:
         return mem_read(argp);
     case MEM_IOC_READ_CACHE:
         return mem_read_cache(argp);
-    case MEM_IOC_READ_BATCH:
-        return mem_read_batch(argp);
     case MEM_IOC_GET_PID:
         return mem_get_pid(argp);
     case MEM_IOC_GET_PIDS:
@@ -174,70 +167,32 @@ static long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         return udp_capture_init(argp);
     case UDP_IOC_READ:
         return udp_capture_read(argp);
-    case UDP_IOC_READ_V2:
-        return udp_capture_read_v2(argp);
-    case UDP_IOC_BIND_FD:
-        return udp_capture_bind_fd(argp);
     case UDP_IOC_STOP:
         return udp_capture_stop();
-    case MEM_IOC_CAPABILITIES:
-        return dfm_capabilities(argp);
-    case DFM_CPU_CLOCK_IOC_SET_TARGET: {
-        /* Lazy: patch clock_gettime only when the client actually asks for
-         * scaling; loading the module leaves the syscall table untouched. */
-        const int clock_ret = syscall_cpu_clock_init();
-        if (clock_ret < 0)
-            return clock_ret;
-        return syscall_cpu_clock_set_target(argp);
-    }
-    case MEM_IOC_FUTEX_WAITERS:
-        return dfm_futex_waiters(filp, argp);
-    case MEM_IOC_FUTEX_VALIDATE:
-        return dfm_futex_validate(filp, argp);
     case DFM_FILE_IOC_READ:
         return dfm_file_read(argp);
     case DFM_FILE_IOC_WRITE:
         return dfm_file_write(argp);
     case DFM_CRED_IOC_ACQUIRE_SF_GROUPS:
         return dfm_sf_groups_acquire(argp);
+    case DFM_CPU_CLOCK_IOC_SET_TARGET:
+        return syscall_cpu_clock_set_target(argp);
     default:
         return -ENOTTY;
     }
 }
 
-/* Control fds are handed out per magic reboot() call; the capture/touch
- * engines behind them are process-global singletons, so tear them down only
- * when the last control fd closes instead of on the first one. */
-static atomic_t g_drv_fds = ATOMIC_INIT(0);
-/* Marks a file that was successfully counted in g_drv_fds. install_fd() can
- * fput() a file whose fd it never installed, and __fput() still calls
- * ->release(): that call must not decrement the counter. */
-static const int g_drv_fd_marker;
-/* Serialises (inc + fd_install) against (dec + engine teardown), so a previous
- * session's tail cannot stop a session a new fd just started. */
-static DEFINE_MUTEX(g_drv_lock);
-
 static int drv_release(struct inode *inode, struct file *filp)
 {
-    int last;
-
-    /* Per-owner state dies with this fd; the capture/touch engines are
-     * process-global, so only the last control fd may stop them. */
-    dfm_hwb_release_owner(filp);
-
-    if (filp->private_data != &g_drv_fd_marker)
+    if (filp->private_data != filp)
         return 0;
-    filp->private_data = NULL;
 
-    mutex_lock(&g_drv_lock);
-    last = atomic_dec_and_test(&g_drv_fds);
-    if (last) {
-        udp_capture_stop();
     dfm_futex_release(filp);
-        touch_v2_release_all();
-        touch_release_all();
-    }
-    mutex_unlock(&g_drv_lock);
+    dfm_hwb_release_owner(filp);
+    udp_capture_stop();
+    touch_v2_release_all();
+    touch_release_all();
+    atomic_dec(&g_driver_files);
     return 0;
 }
 
@@ -249,51 +204,50 @@ static const struct file_operations drv_fops = {
 };
 
 static int g_reboot_kprobe_registered;
-static int g_ni_kprobe_registered;
-static int g_sys_ni_kprobe_registered;
 
 /* ---- fd installation ---- */
 
-static int install_fd(int __user *outp)
-{
-    struct file *filp;
-    int fd;
-
-    /* Create the file before reserving the fd: its fops pin THIS_MODULE, so the
-     * temporary pin taken in reboot_handler_pre() is never the last reference
-     * when the task_work callback drops it. */
-    filp = anon_inode_getfile("[eventpoll]", &drv_fops, NULL,
-                              O_RDWR | O_CLOEXEC);
-    if (IS_ERR(filp))
-        return PTR_ERR(filp);
-
-    fd = get_unused_fd_flags(O_CLOEXEC);
-    if (fd < 0) {
-        fput(filp);
-        return fd;
-    }
-
-    /* Hand the number to userspace BEFORE installing it, so the fd cannot be
-     * reused by another thread between copy_to_user() and fd_install(). */
-    if (copy_to_user(outp, &fd, sizeof(fd))) {
-        put_unused_fd(fd);
-        fput(filp);
-        return -EFAULT;
-    }
-
-    mutex_lock(&g_drv_lock);
-    filp->private_data = (void *)&g_drv_fd_marker;
-    atomic_inc(&g_drv_fds);
-    fd_install(fd, filp);
-    mutex_unlock(&g_drv_lock);
-    return 0;
-}
-
 int install_fd_to_user(int __user *outp)
 {
+    struct file *filp = NULL;
+    int fd;
+
     if (!outp)
         return -EFAULT;
-    return install_fd(outp);
+    if (!install_try_get())
+        return -ESHUTDOWN;
+
+    fd = get_unused_fd_flags(O_CLOEXEC);
+    if (fd < 0)
+        goto copy_result;
+
+    filp = anon_inode_getfile("[dfm]", &drv_fops, NULL,
+                              O_RDWR | O_CLOEXEC);
+    if (IS_ERR(filp)) {
+        put_unused_fd(fd);
+        fd = PTR_ERR(filp);
+        goto copy_result;
+    }
+
+copy_result:
+    /* Publish the fd only after delivering its number. A reserved fd cannot
+     * be closed and reused by another thread while copying the result. */
+    if (copy_to_user(outp, &fd, sizeof(fd))) {
+        pr_err("install fd copy_to_user failed\n");
+        if (fd >= 0) {
+            put_unused_fd(fd);
+            fput(filp);
+        }
+        fd = -EFAULT;
+    } else if (fd >= 0) {
+        /* Only published files own client resources in drv_release(). */
+        filp->private_data = filp;
+        atomic_inc(&g_driver_files);
+        fd_install(fd, filp);
+    }
+
+    install_put();
+    return fd < 0 ? fd : 0;
 }
 
 /* ---- task_work callback to install fd from process context ---- */
@@ -308,24 +262,28 @@ static void install_fd_tw_func(struct callback_head *cb)
     struct install_tw *tw =
         container_of(cb, struct install_tw, cb);
 
-    install_fd_to_user(tw->outp);
+    if (!(current->flags & PF_EXITING))
+        install_fd_to_user(tw->outp);
 
     kfree(tw);
-    module_put(THIS_MODULE);
+    install_put();
 }
 
 /* ---- reboot kprobe handler ---- */
 
-/* Shared by the __arm64_sys_* wrapper kprobes.  The wrapper receives the
- * user's pt_regs pointer in x0. */
-static int install_from_user_regs(struct pt_regs *real_regs)
+static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
+    struct pt_regs *real_regs;
     int magic1, magic2;
     unsigned long arg4;
     struct install_tw *tw;
 
-    if (!real_regs)
+    /* Apply the same caller restriction as syscall_install_handler(). */
+    if (current_uid().val > 1000)
         return 0;
+
+    /* ARM64 syscall wrapper: first arg is pointer to user pt_regs */
+    real_regs = (struct pt_regs *)regs->regs[0];
 
     magic1 = (int)real_regs->regs[0];
     magic2 = (int)real_regs->regs[1];
@@ -333,20 +291,13 @@ static int install_from_user_regs(struct pt_regs *real_regs)
     if (magic1 != INSTALL_MAGIC1 || magic2 != INSTALL_MAGIC2)
         return 0;
 
-
-    if (current_uid().val > 1000)
-        return 0;
-
-    /* The task_work callback runs module text after the syscall returns;
-     * pin the module until it has run so rmmod cannot free that text. */
-    if (!try_module_get(THIS_MODULE))
-        return 0;
-
     arg4 = (unsigned long)real_regs->regs[3];
 
+    if (!arg4 || !install_try_get())
+        return 0;
     tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
     if (!tw) {
-        module_put(THIS_MODULE);
+        install_put();
         return 0;
     }
 
@@ -355,30 +306,11 @@ static int install_from_user_regs(struct pt_regs *real_regs)
 
     if (task_work_add(current, &tw->cb, TWA_RESUME)) {
         kfree(tw);
-        /* Log before dropping the pin: module text/rodata must not be touched
-         * after module_put() may have released the last reference. */
-        pr_err("task_work_add failed\n");
-        module_put(THIS_MODULE);
+        install_put();
+        pr_warn("task_work_add failed\n");
     }
 
     return 0;
-}
-
-static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
-    /* Do not trust regs->regs[0] here: on kernels where the unused-syscall
-     * slot is a plain no-argument function, x0 is the first user argument
-     * (our magic), not a pt_regs pointer.  current_pt_regs() always gives
-     * the real user register frame for the active syscall. */
-    return install_from_user_regs(current_pt_regs());
-}
-
-/* Fallback for kernels where the unused-syscall slot resolves to the
- * non-wrapper sys_ni_syscall.  Its kprobe regs no longer contain the user
- * pt_regs pointer, so read the current syscall's user regs directly. */
-static int sys_ni_handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
-    return install_from_user_regs(current_pt_regs());
 }
 
 static struct kprobe kp_reboot = {
@@ -386,263 +318,304 @@ static struct kprobe kp_reboot = {
     .pre_handler = reboot_handler_pre,
 };
 
-/* enenkernel clients do not look at /sys/module/dfm: they probe unused syscall
- * numbers until one writes the control fd into their buffer. Those numbers all
- * dispatch to __arm64_sys_ni_syscall, so a kprobe there makes the fd reachable
- * without patching the read-only syscall table (stage 0). */
-static struct kprobe kp_ni = {
-    .symbol_name = "__arm64_sys_ni_syscall",
-    .pre_handler = reboot_handler_pre,
+#if defined(CONFIG_MODULE_UNLOAD) && defined(CONFIG_SYSFS) && defined(CONFIG_TASKS_RCU)
+
+static DEFINE_MUTEX(g_unload_lock);
+static DECLARE_COMPLETION(g_unload_done);
+static bool g_unload_work_queued;
+static bool g_unload_started;
+static bool g_unload_prepared;
+static int g_unload_result;
+
+/* The caller explicitly requests an unload and owns its last driver handle.
+ * Restore the original sysfs controls, then let userspace close that handle
+ * before using prepare_unload. The existing zero-client gate still decides
+ * whether hooks can be detached and the lifetime reference can be released. */
+static int expose_unload_controls(void)
+{
+    const int *modules_disabled;
+    unsigned long flags;
+    bool busy;
+    bool was_accepting;
+    int ret;
+
+    if (!capable(CAP_SYS_MODULE))
+        return -EPERM;
+    if (READ_ONCE(THIS_MODULE->state) != MODULE_STATE_LIVE)
+        return -EBUSY;
+    modules_disabled = (const int *)kallsyms_lookup_name("modules_disabled");
+    if (modules_disabled && READ_ONCE(*modules_disabled))
+        return -EPERM;
+    mutex_lock(&g_unload_lock);
+    spin_lock_irqsave(&g_install_lock, flags);
+    was_accepting = g_accept_installs;
+    busy = g_install_users || atomic_read(&g_driver_files) != 1;
+    if (!busy)
+        g_accept_installs = false;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+    if (busy || process_mem_in_use() || touch_v2_has_pending_events())
+        ret = -EBUSY;
+    else
+        ret = dfm_module_sysfs_restore_for_unload();
+    if (ret && !busy)
+        set_install_admission(was_accepting);
+    mutex_unlock(&g_unload_lock);
+    return ret;
+}
+
+static int stop_new_installs(void)
+{
+    unsigned long flags;
+    bool was_accepting;
+
+    spin_lock_irqsave(&g_install_lock, flags);
+    if (g_install_users || atomic_read(&g_driver_files)) {
+        spin_unlock_irqrestore(&g_install_lock, flags);
+        return -EBUSY;
+    }
+    was_accepting = g_accept_installs;
+    g_accept_installs = false;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+
+    if (!process_mem_in_use() && !touch_v2_has_pending_events())
+        return 0;
+
+    /* An existing session or an input release still needs to finish. */
+    set_install_admission(was_accepting);
+    return -EBUSY;
+}
+
+static void prepare_unload_workfn(struct work_struct *work)
+{
+    int ret;
+
+    ret = touch_quiesce_read_hook();
+    if (ret)
+        goto done;
+    g_unload_started = true;
+    ret = dfm_hwb_clear();
+    if (!ret)
+        ret = syscall_cpu_clock_exit();
+    if (!ret)
+        ret = syscall_hook_exit();
+    if (!ret && g_reboot_kprobe_registered) {
+        unregister_kprobe(&kp_reboot);
+        g_reboot_kprobe_registered = 0;
+        /* Pending task work pins the module. Drain the return instructions
+         * of callbacks that just dropped their references. */
+        synchronize_rcu_tasks();
+    }
+    if (!ret)
+        dfm_sf_avc_exit();
+done:
+    if (ret)
+        pr_warn("unload preparation failed: %d\n", ret);
+    g_unload_result = ret;
+    complete(&g_unload_done);
+}
+
+static DECLARE_WORK(g_unload_work, prepare_unload_workfn);
+
+static int prepare_unload_set(const char *value, const struct kernel_param *param)
+{
+    const int *modules_disabled;
+    bool requested;
+    long waited;
+    int ret;
+
+    if (kstrtobool(value, &requested) || !requested)
+        return -EINVAL;
+    if (!capable(CAP_SYS_MODULE))
+        return -EPERM;
+    modules_disabled = (const int *)kallsyms_lookup_name("modules_disabled");
+    if (modules_disabled && READ_ONCE(*modules_disabled))
+        return -EPERM;
+    if (READ_ONCE(THIS_MODULE->state) != MODULE_STATE_LIVE)
+        return -EBUSY;
+
+    /* sysfs restore publishes this callback while holding g_unload_lock.
+     * A failed restore removes that group and drains active callbacks, so
+     * waiting here would deadlock its rollback. Concurrent requests retry. */
+    if (!mutex_trylock(&g_unload_lock))
+        return -EBUSY;
+    ret = 0;
+    if (g_unload_prepared)
+        goto out;
+    if (!g_unload_work_queued) {
+        ret = stop_new_installs();
+        if (ret)
+            goto out;
+        reinit_completion(&g_unload_done);
+        g_unload_work_queued = true;
+        queue_work(system_unbound_wq, &g_unload_work);
+    }
+
+    /* A sleeping hook can delay a grace period. If that happens, leave the
+     * lifetime pin in place and let a later request collect the result. */
+    waited = wait_for_completion_killable_timeout(&g_unload_done,
+                                                  msecs_to_jiffies(10000));
+    if (waited <= 0) {
+        ret = waited ? (int)waited : -ETIMEDOUT;
+        goto out;
+    }
+    flush_work(&g_unload_work);
+    g_unload_work_queued = false;
+    ret = g_unload_result;
+    if (!ret) {
+        g_unload_prepared = true;
+        module_put(THIS_MODULE);
+    } else if (!g_unload_started) {
+        /* A still-open touch proxy can keep serving existing clients. */
+        set_install_admission(true);
+    }
+out:
+    mutex_unlock(&g_unload_lock);
+    return ret;
+}
+
+static int prepare_unload_get(char *buf, const struct kernel_param *param)
+{
+    unsigned long flags;
+    bool preparing;
+
+    spin_lock_irqsave(&g_install_lock, flags);
+    preparing = !g_accept_installs &&
+                READ_ONCE(THIS_MODULE->state) == MODULE_STATE_LIVE;
+    spin_unlock_irqrestore(&g_install_lock, flags);
+    return sprintf(buf, "%c\n", preparing ? 'Y' : 'N');
+}
+
+static int unload_supported_get(char *buf, const struct kernel_param *param)
+{
+    return sprintf(buf, "Y\n");
+}
+
+static const struct kernel_param_ops prepare_unload_ops = {
+    .set = prepare_unload_set,
+    .get = prepare_unload_get,
+};
+static const struct kernel_param_ops unload_supported_ops = {
+    .get = unload_supported_get,
 };
 
-static struct kprobe kp_sys_ni = {
-    .symbol_name = "sys_ni_syscall",
-    .pre_handler = sys_ni_handler_pre,
-};
+module_param_cb(prepare_unload, &prepare_unload_ops, NULL, 0600);
+module_param_cb(unload_supported, &unload_supported_ops, NULL, 0444);
+
+#else
+static int expose_unload_controls(void) { return -EOPNOTSUPP; }
+#endif
 
 /* ---- module init/exit ---- */
 
-/* Match enenkernel: install the syscall-table hook by default.  The kprobe
- * fallback cannot suppress enenkernel's final reboot() probe, so clients
- * that scan unused syscalls only work through the table hook. */
-static int dfm_stage = DFM_STAGE_FULL;
-/* Readable so the loader can distinguish a stage-1/2/3 diagnostic load (no
- * fd-install entry) from a usable module; the value is only supplied at
- * finit_module time. */
-/* Root-only: the loader reads it, non-root cannot fingerprint it. */
-module_param_named(dfm_stage, dfm_stage, int, 0400);
+static bool __init proc_entry_exists(const char *name)
+{
+    struct path path;
+
+    if (kern_path(name, 0, &path))
+        return false;
+    path_put(&path);
+    return true;
+}
+
+static void __init remove_inte_proc_entries(void)
+{
+    /* Best-effort existence checks avoid removing already absent entries.
+     * Checking existence only looks up the path; it does not open/read it. */
+    if (proc_entry_exists("/proc/inte_ko"))
+        remove_proc_entry("inte_ko", NULL);
+    if (proc_entry_exists("/proc/inte_systbl"))
+        remove_proc_entry("inte_systbl", NULL);
+    if (proc_entry_exists("/proc/inte_status"))
+        remove_proc_entry("inte_status", NULL);
+}
+
 static int __init mod_init(void)
 {
-	int ret;
-	int syscall_ret;
-	int reboot_ret;
-	int ni_ret = -ENOENT;
-	int sys_ni_ret = -ENOENT;
+    int ret;
+    int syscall_ret;
+    int reboot_ret;
 
-	ret = dfm_compat_init();
-	if (ret < 0) {
-		pr_err("compat init failed: %d\n", ret);
-		return ret;
-	}
-	if (dfm_compat_missing) {
-		/* A usable module must hand out the control fd; a degraded load
-		 * looks successful to the loader but enen then falls back to its
-		 * reboot-probe and the phone restarts. Keep stage 1 for diagnostics,
-		 * but refuse the normal full load. */
-		if (dfm_stage == DFM_STAGE_COMPAT)
-			return 0;
-		pr_err("required compat symbols missing: %u; refusing usable load\n",
-		       dfm_compat_missing);
-		return -ENOENT;
-	}
+    ret = dfm_compat_init();
+    if (ret < 0)
+        return ret;
 
-	dfm_info("compat ready, stage=%d\n", dfm_stage);
-	if (dfm_stage == DFM_STAGE_COMPAT)
-		return 0;
+    ret = mem_core_init();
+    if (ret < 0) {
+        pr_err("mem_core_init failed: %d\n", ret);
+        return ret;
+    }
 
-	ret = mem_core_init();
-	if (ret < 0) {
-		pr_err("mem_core_init unavailable: %d\n", ret);
-	} else {
-		g_mem_inited = true;
-	}
-	if (dfm_stage == DFM_STAGE_MEM)
-		return 0;
+    ret = dfm_file_io_init();
+    if (ret < 0) {
+        pr_err("dfm_file_io_init failed: %d\n", ret);
+        mem_core_exit();
+        return ret;
+    }
 
-	ret = dfm_file_io_init();
-	if (ret < 0) {
-		pr_err("dfm_file_io_init unavailable: %d\n", ret);
-	} else {
-		g_file_inited = true;
-	}
-	if (dfm_stage == DFM_STAGE_FILE)
-		return 0;
+    ret = dfm_sf_avc_init();
+    if (ret < 0)
+        /* Core clients remain usable; SF startup requires the active-probe
+         * capability and reports the normal reboot-required message. */
+        pr_warn("SurfaceFlinger AVC capability unavailable: %d\n", ret);
 
-	if (dfm_stage == DFM_STAGE_SYSCALL) {
-		syscall_ret = syscall_hook_init();
-		if (syscall_ret < 0) {
-			/* No fd-install entry without this hook: fail closed. */
-			pr_err("syscall install hook unavailable: %d\n",
-			       syscall_ret);
-			ret = syscall_ret;
-			goto err_file;
-		}
-		return 0;
-	}
+    syscall_ret = syscall_hook_init();
+    if (syscall_ret < 0)
+        pr_warn("syscall install hook unavailable: %d\n", syscall_ret);
 
-	if (dfm_stage == DFM_STAGE_REBOOT) {
-		reboot_ret = register_kprobe(&kp_reboot);
-		if (reboot_ret < 0) {
-			pr_err("failed to register kprobe on reboot: %d\n",
-				reboot_ret);
-			ret = reboot_ret;
-			goto err_file;
-		}
-		g_reboot_kprobe_registered = 1;
-		return 0;
-	}
+    /* Queued install callbacks must have a Tasks RCU return grace period
+     * on kernels that allow module removal. */
+    reboot_ret = -EOPNOTSUPP;
+    if (!IS_ENABLED(CONFIG_MODULE_UNLOAD) || IS_ENABLED(CONFIG_TASKS_RCU))
+        reboot_ret = register_kprobe(&kp_reboot);
+    if (reboot_ret < 0) {
+        pr_warn("failed to register kprobe on reboot: %d\n", reboot_ret);
+    } else {
+        g_reboot_kprobe_registered = 1;
+    }
 
-	if (dfm_stage == DFM_STAGE_NO_SYSCALL) {
-		syscall_ret = -ENOENT;
-		dfm_info("skipping syscall hook, using ni/reboot kprobes\n");
-	} else {
-		syscall_ret = syscall_hook_init();
-		if (syscall_ret < 0) {
-			pr_err("syscall install hook unavailable: %d\n",
-				syscall_ret);
-			ret = syscall_ret;
-			goto err_file;
-		}
-	}
+    if (syscall_ret < 0 && reboot_ret < 0) {
+        pr_err("no fd install entry registered\n");
+        dfm_sf_avc_exit();
+        dfm_file_io_exit();
+        mem_core_exit();
+        return reboot_ret;
+    }
 
-	reboot_ret = register_kprobe(&kp_reboot);
-	if (reboot_ret < 0) {
-		pr_err("failed to register kprobe on reboot: %d\n",
-			reboot_ret);
-	} else {
-		g_reboot_kprobe_registered = 1;
-	}
+    ret = syscall_cpu_clock_init();
+    if (ret < 0)
+        pr_warn("CPU-clock mitigation unavailable: %d\n", ret);
 
-	ni_ret = -ENOENT;
-	sys_ni_ret = -ENOENT;
-	if (syscall_ret < 0) {
-		ni_ret = register_kprobe(&kp_ni);
-		if (ni_ret < 0)
-			pr_err("failed to register kprobe on __arm64_sys_ni_syscall: %d\n",
-			       ni_ret);
-		else
-			g_ni_kprobe_registered = 1;
+    (void)kgsl_hide_init();
 
-		sys_ni_ret = register_kprobe(&kp_sys_ni);
-		if (sys_ni_ret < 0)
-			pr_err("failed to register kprobe on sys_ni_syscall: %d\n",
-			       sys_ni_ret);
-		else
-			g_sys_ni_kprobe_registered = 1;
-	}
-	if (ni_ret < 0)
-		ni_ret = sys_ni_ret;
+    remove_inte_proc_entries();
 
-	/* Never patch the syscall table implicitly here: stage 0 is exactly the
-	 * stop_machine/text-patch path that hangs some GKI builds. If neither
-	 * kprobe is available, fail the load instead of falling back silently. */
-	if (dfm_stage == DFM_STAGE_NO_SYSCALL && reboot_ret < 0 &&
-	    ni_ret < 0) {
-		pr_err("no kprobe fd entry; refusing implicit syscall hook\n");
-		ret = -ENOENT;
-		goto err_hooks;
-	}
+    /* Keep the loader-owned objects alive while sysfs is detached. Explicit
+     * unload preparation restores them before releasing the lifetime pin. */
+    __module_get(THIS_MODULE);
+    ret = dfm_module_sysfs_detach();
+    if (ret)
+        pr_warn("module sysfs detach unavailable: %d\n", ret);
+    set_install_admission(true);
 
-	if (syscall_ret < 0 && reboot_ret < 0 && ni_ret < 0) {
-		pr_err("no fd install entry registered\n");
-		ret = reboot_ret;
-		goto err_hooks;
-	}
-
-	(void)kgsl_hide_init();
-
-	/* Match enenkernel: drop the module's sysfs kobject so /sys/module/dfm
-	 * disappears. Module parameters and the loader's temporary stage
-	 * argument are not exposed after init. */
-	kobject_del(&THIS_MODULE->mkobj.kobj);
-	return 0;
-
-err_hooks:
-	if (dfm_stage == DFM_STAGE_FULL)
-		syscall_hook_exit();
-err_file:
-	if (g_file_inited) {
-		dfm_file_io_exit();
-		g_file_inited = false;
-	}
-	if (g_mem_inited) {
-		mem_core_exit();
-		g_mem_inited = false;
-	}
-	return ret;
+    pr_info("module loaded, syscall_nr=%d reboot_fallback=%d\n",
+            syscall_hook_nr(), g_reboot_kprobe_registered);
+    return 0;
 }
 
 static void __exit mod_exit(void)
 {
-    syscall_cpu_clock_exit();
-    if (dfm_stage == DFM_STAGE_COMPAT) {
-        dfm_info("stage1 module unloaded\n");
-        return;
-    }
-    if (dfm_stage == DFM_STAGE_MEM) {
-        if (g_mem_inited)
-            mem_core_exit();
-        dfm_info("stage2 module unloaded\n");
-        return;
-    }
-    if (dfm_stage == DFM_STAGE_FILE) {
-        if (g_file_inited)
-            dfm_file_io_exit();
-        if (g_mem_inited)
-            mem_core_exit();
-        dfm_info("stage3 module unloaded\n");
-        return;
-    }
-    if (dfm_stage == DFM_STAGE_SYSCALL) {
-        syscall_hook_exit();
-        /* This stage hands out the control fd, so every hook engine behind an
-         * ioctl is reachable. Without teardown the kprobes, the in-kernel text
-         * hooks and the swapped file->f_op would outlive free_module(). */
-        udp_capture_exit();
-        dfm_hwb_exit();
-        touch_v2_release_all();
-        touch_exit();
-        touch_v2_exit();
-        if (g_file_inited)
-            dfm_file_io_exit();
-        if (g_mem_inited)
-            mem_core_exit();
-        dfm_info("stage4 module unloaded\n");
-        return;
-    }
-    if (dfm_stage == DFM_STAGE_REBOOT) {
-        if (g_reboot_kprobe_registered) {
-            unregister_kprobe(&kp_reboot);
-            g_reboot_kprobe_registered = 0;
-        }
-        /* Same as stage 4: the reboot kprobe is the fd install entry here. */
-        udp_capture_exit();
-        dfm_hwb_exit();
-        touch_v2_release_all();
-        touch_exit();
-        touch_v2_exit();
-        if (g_file_inited)
-            dfm_file_io_exit();
-        if (g_mem_inited)
-            mem_core_exit();
-        dfm_info("stage5 module unloaded\n");
-        return;
-    }
-
+    /* The preparation pin permits entry only after all detachable hooks
+     * that can fail to restore have been drained. */
+    dfm_sf_avc_exit();
     kgsl_hide_exit();
-    if (g_reboot_kprobe_registered) {
-        unregister_kprobe(&kp_reboot);
-        g_reboot_kprobe_registered = 0;
-    }
-    if (g_ni_kprobe_registered) {
-        unregister_kprobe(&kp_ni);
-        g_ni_kprobe_registered = 0;
-    }
-    if (g_sys_ni_kprobe_registered) {
-        unregister_kprobe(&kp_sys_ni);
-        g_sys_ni_kprobe_registered = 0;
-    }
-    syscall_hook_exit();
     udp_capture_exit();
     dfm_hwb_exit();
     touch_v2_release_all();
     touch_exit();
     touch_v2_exit();
-    if (g_file_inited)
-        dfm_file_io_exit();
-    if (g_mem_inited)
-        mem_core_exit();
-    dfm_info("module unloaded\n");
+    dfm_file_io_exit();
+    mem_core_exit();
+    pr_info("module unloaded\n");
 }
 
 module_init(mod_init);

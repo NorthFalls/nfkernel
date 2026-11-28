@@ -21,9 +21,9 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
-#include "compat.h"
 #include "abi.h"
 #include "futex.h"
+#include "sf_avc.h"
 
 struct futex_context {
     struct list_head list;
@@ -136,8 +136,6 @@ static typeof(&wait_task_inactive) wait_inactive;
 /* Some Android kernels retain this function without exporting it to modules.
  * Keep the exact header-declared signature and the normal pin/release pair. */
 static typeof(&put_task_stack) release_stack;
-static void *(*futex_try_stack)(struct task_struct *);
-static unsigned long (*futex_wchan)(struct task_struct *);
 static unsigned long futex_sleep_start,futex_sleep_size;
 
 static int resolve_symbols(void)
@@ -152,8 +150,6 @@ static int resolve_symbols(void)
     if(futex_sleep_size)goto out;
     inactive=(void *)futex_symbol("wait_task_inactive");
     put_stack=(void *)futex_symbol("put_task_stack");
-    futex_try_stack=(void *)futex_symbol("try_get_task_stack");
-    futex_wchan=(void *)futex_symbol("get_wchan");
     symbol_size=(void *)futex_symbol("kallsyms_lookup_size_offset");
     start=kallsyms_lookup_name("futex_wait_queue");
     if(!start)start=kallsyms_lookup_name("futex_wait_queue_me");
@@ -210,7 +206,7 @@ static int sample_waiter(struct futex_context *context,struct task_struct *task,
 #endif
     if(!(state&TASK_INTERRUPTIBLE)||READ_ONCE(task->on_cpu)||
        READ_ONCE(task->on_rq))return 0;
-    if(!futex_try_stack || !futex_try_stack(task))return 0;
+    if(!try_get_task_stack(task))return 0;
     /* This preliminary copy is only a filter. It is never returned as a
      * continuation until the subsequent stable interval has been checked. */
     memcpy(&regs,task_pt_regs(task),sizeof(regs));
@@ -219,8 +215,7 @@ static int sample_waiter(struct futex_context *context,struct task_struct *task,
        !wait_matches(args,address,bitset))goto out;
     before=wait_inactive(task,state);
     if(!before){result=-EAGAIN;goto out;}
-    if(!futex_wchan){result=-EOPNOTSUPP;goto out;}
-    wchan=futex_wchan(task);
+    wchan=get_wchan(task);
     if(wchan<futex_sleep_start||wchan-futex_sleep_start>=futex_sleep_size)
         goto out;
     memcpy(&regs,task_pt_regs(task),sizeof(regs));
@@ -394,4 +389,17 @@ unlock:
 free_snapshot:
     kfree(snapshot);
     return error;
+}
+
+long dfm_capabilities(void __user *arg)
+{
+    struct dfm_capabilities_req req;
+    if (!arg || copy_from_user(&req, arg, sizeof(req))) return -EFAULT;
+    if (req.abi_version != DFM_CAPABILITIES_ABI_VERSION ||
+        req.reserved[0] || req.reserved[1]) return -EINVAL;
+    req.out_abi_version = DFM_CAPABILITIES_ABI_VERSION;
+    req.out_features = DFM_CAP_REQUIRED | DFM_CAP_FILE_OBSERVER;
+    if (dfm_sf_avc_ready())
+        req.out_features |= DFM_CAP_SF_AVC_BYPASS;
+    return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }

@@ -1,5 +1,4 @@
-#define pr_fmt(fmt) fmt
-#include "dfm_log.h"
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/cdev.h>
 #include <linux/cred.h>
@@ -8,7 +7,6 @@
 #include <linux/file.h>
 #include <linux/input.h>
 #include <linux/kprobes.h>
-#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
@@ -109,25 +107,19 @@ struct touch_device_caps {
 };
 
 static DEFINE_MUTEX(g_touch_lock);
+static DEFINE_MUTEX(g_touch_read_lock);
+static DEFINE_MUTEX(g_touch_hook_lock);
+static DEFINE_SPINLOCK(g_touch_binding_lock);
 static struct touch_slot_state g_touch_slots[TOUCH_MAX_SLOTS];
 static int g_touch_current_slot;
 static bool g_touch_slots_initialized;
 static struct input_dev *g_touch_input_dev;
 static struct touch_device_caps g_touch_device_caps;
 static ssize_t (*g_touch_orig_read)(struct file *, char __user *, size_t, loff_t *);
+static const struct file_operations *g_touch_original_fops;
 static struct file_operations g_touch_proxy_fops;
-static struct work_struct g_touch_stop_read_work;
-static bool g_touch_stop_work_initialized;
 static bool g_touch_read_hook_registered;
 static bool g_touch_proxy_installed;
-/* Set while touch_exit() drains the stop-read work: a work item queued after
- * cancel_work_sync() would run module text after rmmod has freed it. */
-static bool g_touch_exiting;
-/* The proxy pins the module around evdev_read(), which may block until the next
- * input event. That keeps rmmod at -EBUSY for that whole time, which is the
- * intended safe behaviour; there is no runtime switch to disable it. */
-/* Frame bookkeeping lives in file scope so touch_exit() can reset it. */
-static bool g_touch_first_down;
 static struct input_event g_touch_read_events[TOUCH_MAX_EVENTS];
 static struct touch_event_list g_touch_final_events;
 
@@ -136,22 +128,6 @@ static struct touch_event_list g_touch_final_events;
  * paths so a stuck hook still shows *why*. Kept under g_touch_lock; a full copy
  * lives in the struct so user copy_to_user reads a coherent view. */
 static struct touch_status g_touch_status;
-
-/* Files whose f_op we replaced with g_touch_proxy_fops. Every entry pins the
- * struct file with get_file(), so a tracked file can never reach ->release()
- * nor be freed while it sits on this list; touch_restore_all_files() drops
- * those references on module exit and puts the original f_op back. The list is
- * guarded by g_touch_patch_lock, a spinlock because the install side runs from
- * the __arm64_sys_read kprobe pre_handler, i.e. with interrupts disabled, where
- * a mutex must not be taken and allocation must use GFP_ATOMIC. */
-struct touch_patched_file {
-    struct list_head node;
-    struct file *file;
-    const struct file_operations *orig_fops;
-};
-
-static LIST_HEAD(g_touch_patched_files);
-static DEFINE_SPINLOCK(g_touch_patch_lock);
 
 static bool touch_test_bit(int bit, const unsigned long *array)
 {
@@ -204,8 +180,7 @@ static void touch_signal_device_locked(void)
     if (!g_touch_input_dev)
         return;
 
-    /* A lone EV_SYN/SYN_CONFIG frame is non-standard and every evdev reader
-     * sees it; SYN_REPORT below is the frame the input core expects. */
+    input_event(g_touch_input_dev, EV_SYN, SYN_CONFIG, 0);
     input_event(g_touch_input_dev, EV_SYN, SYN_REPORT, 0);
 }
 
@@ -265,9 +240,10 @@ static void touch_append_event(struct touch_event_list *list,
     list->count++;
 }
 
-static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
+static ssize_t touch_read_proxy(struct file *file, char __user *buf,
                                     size_t count, loff_t *pos)
 {
+    static bool first_down;
     struct evdev_client *client = file->private_data;
     struct input_event *time_template = NULL;
     int current_slot;
@@ -276,46 +252,32 @@ static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
     int i;
     ssize_t ret;
     size_t copy_size;
-    size_t max_copy;
 
     if (!client || !g_touch_orig_read)
         return -EINVAL;
 
-    /* evdev semantics: a buffer smaller than one input_event is invalid. */
-    if (count < sizeof(struct input_event))
-        return -EINVAL;
-
-    /* Never hold g_touch_lock across evdev_read(): a blocking reader sleeps in
-     * wait_event_interruptible() and would then deadlock touch_event(),
-     * touch_get_status(), touch_release_all() and touch_exit()/rmmod.
-     * The mutex only protects the slot bookkeeping below. */
+    /* Keep readers ordered without blocking driver release behind an
+     * input read or a user copy. */
+    mutex_lock(&g_touch_read_lock);
     ret = g_touch_orig_read(file, buf, count, pos);
     if (ret <= 0 || (ret % sizeof(struct input_event)) != 0)
-        return ret;
+        goto out_read;
+
+    num_events = ret / sizeof(struct input_event);
+    if (num_events > TOUCH_MAX_EVENTS)
+        goto out_read;
+
+    copy_size = (size_t)ret;
+    memset(g_touch_read_events, 0, sizeof(g_touch_read_events));
+    memset(&g_touch_final_events, 0, sizeof(g_touch_final_events));
+
+    if (copy_from_user(g_touch_read_events, buf, copy_size)) {
+        ret = -EFAULT;
+        goto out_read;
+    }
 
     mutex_lock(&g_touch_lock);
     touch_init_slots_locked();
-
-    if (!g_touch_input_dev)
-        g_touch_input_dev = client->evdev->handle.dev;
-
-    num_events = ret / sizeof(struct input_event);
-    if (num_events > TOUCH_MAX_EVENTS) {
-        mutex_unlock(&g_touch_lock);
-        return ret;
-    }
-
-    copy_size = (size_t)ret;
-    /* touch_append_event() fills every field of each appended event and the
-     * read buffer is fully covered by copy_from_user() below, so only the
-     * output count needs resetting; the two 6 KiB memsets ran per read(). */
-    g_touch_final_events.count = 0;
-
-    if (copy_from_user(g_touch_read_events, buf, copy_size)) {
-        mutex_unlock(&g_touch_lock);
-        return -EFAULT;
-    }
-
     current_slot = g_touch_current_slot;
     for (i = 0; i < num_events; ++i) {
         struct input_event *event = &g_touch_read_events[i];
@@ -377,7 +339,7 @@ static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
                 touch_append_event(&g_touch_final_events, time_template,
                                        EV_ABS, ABS_MT_PRESSURE, 1);
             }
-            if (!g_touch_first_down) {
+            if (!first_down) {
                 if (g_touch_device_caps.has_btn_touch) {
                     touch_append_event(&g_touch_final_events, time_template,
                                            EV_KEY, BTN_TOUCH, 1);
@@ -386,7 +348,7 @@ static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
                     touch_append_event(&g_touch_final_events, time_template,
                                            EV_KEY, BTN_TOOL_FINGER, 1);
                 }
-                g_touch_first_down = true;
+                first_down = true;
             }
             touch_append_event(&g_touch_final_events, time_template,
                                    EV_ABS, ABS_MT_POSITION_X, g_touch_slots[i].x);
@@ -417,8 +379,8 @@ static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
         }
     }
 
-    if (!any_active && g_touch_first_down) {
-        g_touch_first_down = false;
+    if (!any_active && first_down) {
+        first_down = false;
         if (g_touch_device_caps.has_btn_touch) {
             touch_append_event(&g_touch_final_events, time_template,
                                    EV_KEY, BTN_TOUCH, 0);
@@ -431,39 +393,33 @@ static ssize_t touch_read_proxy_impl(struct file *file, char __user *buf,
 
     touch_append_event(&g_touch_final_events, time_template, EV_SYN, SYN_REPORT, 0);
     copy_size = (size_t)g_touch_final_events.count * sizeof(struct input_event);
-
-    /* Never write past the caller buffer and never split an input_event:
-     * round the limit down to a whole number of events. */
-    max_copy = count - (count % sizeof(struct input_event));
-    if (copy_size > max_copy)
-        copy_size = max_copy;
-
     mutex_unlock(&g_touch_lock);
 
-    if (copy_to_user(buf, g_touch_final_events.events, copy_size))
-        return -EFAULT;
-
-    return (ssize_t)copy_size;
-}
-
-/* The patched f_op was copied from evdev's fops, so its .owner is NULL and the
- * patched file does not pin this module: rmmod would not wait for a reader that
- * is already inside the proxy. Pin it for the duration of the call; after
- * try_stop_module() try_module_get() fails and no module text runs. */
-static ssize_t touch_read_proxy(struct file *file, char __user *buf,
-                                size_t count, loff_t *pos)
-{
-    ssize_t ret;
-
-
-    if (!try_module_get(THIS_MODULE))
-        return -ENODEV;
-    ret = touch_read_proxy_impl(file, buf, count, pos);
-    module_put(THIS_MODULE);
+    ret = copy_to_user(buf, g_touch_final_events.events, copy_size)
+        ? -EFAULT : (ssize_t)copy_size;
+out_read:
+    mutex_unlock(&g_touch_read_lock);
     return ret;
 }
 
 static struct kprobe g_touch_read_kprobe;
+
+static int touch_proxy_release(struct inode *inode, struct file *file)
+{
+    const struct file_operations *original = g_touch_original_fops;
+    int ret = 0;
+
+    mutex_lock(&g_touch_lock);
+    g_touch_input_dev = NULL;
+    g_touch_status.installed = 0;
+    mutex_unlock(&g_touch_lock);
+    if (original->release)
+        ret = original->release(inode, file);
+    /* Keep the original file's ownership reference until its release runs.
+     * The VFS drops the proxy's separate reference after we return. */
+    fops_put(original);
+    return ret;
+}
 
 static void touch_unregister_read_hook_now(void)
 {
@@ -476,16 +432,12 @@ static void touch_unregister_read_hook_now(void)
 
 static void touch_stop_read_workfn(struct work_struct *work)
 {
+    mutex_lock(&g_touch_hook_lock);
     touch_unregister_read_hook_now();
+    mutex_unlock(&g_touch_hook_lock);
 }
 
-static void touch_stop_read_hook(void)
-{
-    if (!g_touch_stop_work_initialized || READ_ONCE(g_touch_exiting))
-        return;
-
-    schedule_work(&g_touch_stop_read_work);
-}
+static DECLARE_WORK(g_touch_stop_read_work, touch_stop_read_workfn);
 
 /* Reject-reason codes mirrored in struct touch_status.last_reject_reason.
  * Keep 0=none / 1..N=reasons stable — user side compares by number. */
@@ -523,7 +475,7 @@ static void touch_note_reject(int reason, const char *path)
 
     /* 只在真“可疑”的拒因(uid 通过后仍被过滤)上落 dmesg, 且限速. */
     if (reason == TOUCH_REJECT_CAPS)
-        dfm_warn_ratelimited(
+        pr_warn_ratelimited(
             "touch reject reason=caps uid=%u comm=%s path=%s\n",
             current_uid().val, current->comm, path ? path : "?");
 }
@@ -533,12 +485,11 @@ static int touch_try_patch_file(struct file *file)
     struct evdev_client *client;
     struct evdev *evdev;
     struct input_dev *idev;
+    const struct file_operations *original;
+    unsigned long flags;
     char leader[TASK_COMM_LEN];
     char path_buf[256];
     char *path;
-    struct touch_patched_file *patched;
-    struct touch_patched_file *iter;
-    unsigned long flags;
 
     if (!file || IS_ERR(file))
         return 0;
@@ -555,7 +506,8 @@ static int touch_try_patch_file(struct file *file)
     if (!strcmp(leader, "surfaceflinger"))
         return 0;
 
-    if (!file->f_op || !file->f_op->read)
+    original = READ_ONCE(file->f_op);
+    if (!original || !original->read)
         return 0;
 
     if (!file->f_path.dentry || !file->f_path.dentry->d_name.name)
@@ -604,60 +556,33 @@ static int touch_try_patch_file(struct file *file)
         (!touch_test_bit(BTN_TOUCH, idev->keybit) &&
          !touch_test_bit(BTN_TOOL_FINGER, idev->keybit))) {
         touch_note_reject(TOUCH_REJECT_CAPS, path);
-        dfm_warn_ratelimited(
+        pr_warn_ratelimited(
             "touch reject reason=btn_touch uid=%u comm=%s path=%s (缺 BTN_TOUCH/BTN_TOOL_FINGER, 疑幻影设备)\n",
             current_uid().val, current->comm, path);
         return 0;
     }
 
+    spin_lock_irqsave(&g_touch_binding_lock, flags);
     if (g_touch_proxy_installed) {
         g_touch_status.last_reject_reason = TOUCH_REJECT_INSTALLED;
-        touch_stop_read_hook();
+        spin_unlock_irqrestore(&g_touch_binding_lock, flags);
+        schedule_work(&g_touch_stop_read_work);
+        return 0;
+    }
+    if (READ_ONCE(file->f_op) != original || !try_module_get(THIS_MODULE)) {
+        spin_unlock_irqrestore(&g_touch_binding_lock, flags);
         return 0;
     }
 
-    patched = kzalloc(sizeof(*patched), GFP_ATOMIC);
-    if (!patched) {
-        dfm_warn_ratelimited("cannot track patched file, skip %s\n", path);
-        return -ENOMEM;
-    }
-
-    patched->file = get_file(file);
-    patched->orig_fops = file->f_op;
-
-    spin_lock_irqsave(&g_touch_patch_lock, flags);
-    list_for_each_entry(iter, &g_touch_patched_files, node) {
-        if (iter->file == file) {
-            spin_unlock_irqrestore(&g_touch_patch_lock, flags);
-            fput(file);
-            kfree(patched);
-            return 0;
-        }
-    }
-    /* The unlocked check above is only a fast path: two CPUs can both pass it
-     * and patch two different devices, leaving the globals describing the
-     * second device while the first device's reads are proxied too. Re-check
-     * and claim under the lock. */
-    if (g_touch_proxy_installed) {
-        spin_unlock_irqrestore(&g_touch_patch_lock, flags);
-        fput(patched->file);
-        kfree(patched);
-        g_touch_status.last_reject_reason = TOUCH_REJECT_INSTALLED;
-        touch_stop_read_hook();
-        return 0;
-    }
-    g_touch_proxy_installed = true;
-
-    memcpy(&g_touch_proxy_fops, patched->orig_fops,
-           sizeof(g_touch_proxy_fops));
+    g_touch_original_fops = original;
+    g_touch_orig_read = original->read;
+    g_touch_proxy_fops = *original;
+    g_touch_proxy_fops.owner = THIS_MODULE;
     g_touch_proxy_fops.read = touch_read_proxy;
-    g_touch_orig_read = patched->orig_fops->read;
-    file->f_op = &g_touch_proxy_fops;
-    list_add_tail(&patched->node, &g_touch_patched_files);
-    spin_unlock_irqrestore(&g_touch_patch_lock, flags);
-
+    g_touch_proxy_fops.release = touch_proxy_release;
     g_touch_input_dev = idev;
     touch_cache_device_caps(idev);
+    g_touch_proxy_installed = true;
 
     /* 装完立刻填 status, 给用户态 GET_STATUS 用. path/comm 装成安全的终止串.
      * absinfo 直接读 idev(hint 内核 ABI, 无需 EVIOCGABS). */
@@ -681,9 +606,11 @@ static int touch_try_patch_file(struct file *file)
     g_touch_status.has_btn_touch =
         g_touch_device_caps.has_btn_touch ? 1 : 0;
     g_touch_status.last_reject_reason = TOUCH_REJECT_NONE;
+    smp_store_release(&file->f_op, &g_touch_proxy_fops);
+    spin_unlock_irqrestore(&g_touch_binding_lock, flags);
 
-    touch_stop_read_hook();
-    dfm_info("touch proxy installed on %s for %s (absX=[%d,%d] absY=[%d,%d])\n",
+    schedule_work(&g_touch_stop_read_work);
+    pr_info("touch proxy installed on %s for %s (absX=[%d,%d] absY=[%d,%d])\n",
             path, current->comm,
             g_touch_status.abs_x_min, g_touch_status.abs_x_max,
             g_touch_status.abs_y_min, g_touch_status.abs_y_max);
@@ -710,26 +637,22 @@ static int touch_read_pre_handler(struct kprobe *p, struct pt_regs *regs)
 
 static int touch_start_read_hook(void)
 {
-    int ret;
+    int ret = 0;
 
-    if (g_touch_proxy_installed || g_touch_read_hook_registered)
-        return 0;
-
-    if (!g_touch_stop_work_initialized) {
-        INIT_WORK(&g_touch_stop_read_work, touch_stop_read_workfn);
-        g_touch_stop_work_initialized = true;
-    }
+    mutex_lock(&g_touch_hook_lock);
+    if (READ_ONCE(g_touch_proxy_installed) || g_touch_read_hook_registered)
+        goto out;
 
     memset(&g_touch_read_kprobe, 0, sizeof(g_touch_read_kprobe));
     g_touch_read_kprobe.symbol_name = "__arm64_sys_read";
     g_touch_read_kprobe.pre_handler = touch_read_pre_handler;
 
     ret = register_kprobe(&g_touch_read_kprobe);
-    if (ret < 0)
-        return ret;
-
-    g_touch_read_hook_registered = true;
-    return 0;
+    if (!ret)
+        g_touch_read_hook_registered = true;
+out:
+    mutex_unlock(&g_touch_hook_lock);
+    return ret;
 }
 
 long touch_init(void)
@@ -800,59 +723,26 @@ void touch_release_all(void)
     mutex_unlock(&g_touch_lock);
 }
 
-/* Restore every file whose f_op we swapped back to its original fops and drop
- * the reference taken for tracking it. Must be called with g_touch_lock held
- * and after the kprobe is unregistered, so no new file can be patched from here
- * on. The get_file() reference guarantees that a tracked file cannot be freed
- * nor reach ->release() while it is on the list, so the file->f_op store below
- * is never a use-after-free. If a file's f_op is no longer our proxy, some
- * other owner replaced it: restoring would clobber that owner, so only log. */
-static void touch_restore_all_files(void)
+int touch_quiesce_read_hook(void)
 {
-    struct touch_patched_file *patched;
-    struct touch_patched_file *tmp;
-    LIST_HEAD(patched_files);
-    unsigned long flags;
+    mutex_lock(&g_touch_hook_lock);
+    touch_unregister_read_hook_now();
+    mutex_unlock(&g_touch_hook_lock);
 
-    spin_lock_irqsave(&g_touch_patch_lock, flags);
-    list_splice_init(&g_touch_patched_files, &patched_files);
-    spin_unlock_irqrestore(&g_touch_patch_lock, flags);
-
-    list_for_each_entry_safe(patched, tmp, &patched_files, node) {
-        list_del(&patched->node);
-
-        if (patched->file->f_op == &g_touch_proxy_fops) {
-            patched->file->f_op = patched->orig_fops;
-        } else {
-            dfm_warn("restore skipped: %p f_op changed by other owner\n",
-                    patched->file);
-        }
-
-        fput(patched->file);
-        kfree(patched);
-    }
+    /* The probe can no longer queue work. */
+    cancel_work_sync(&g_touch_stop_read_work);
+    return READ_ONCE(g_touch_status.installed) ? -EBUSY : 0;
 }
 
 void touch_exit(void)
 {
     touch_release_all();
-
-    /* Block new queue_work() from a racing kprobe handler before draining:
-     * otherwise a work item queued after cancel_work_sync() runs module text
-     * after free_module() has unmapped it. */
-    WRITE_ONCE(g_touch_exiting, true);
-    if (g_touch_stop_work_initialized)
-        cancel_work_sync(&g_touch_stop_read_work);
-
+    touch_quiesce_read_hook();
     mutex_lock(&g_touch_lock);
-    touch_unregister_read_hook_now();
-    touch_restore_all_files();
     g_touch_proxy_installed = false;
     g_touch_orig_read = NULL;
     g_touch_input_dev = NULL;
     memset(&g_touch_device_caps, 0, sizeof(g_touch_device_caps));
     memset(&g_touch_status, 0, sizeof(g_touch_status));
-    g_touch_first_down = false;
-    WRITE_ONCE(g_touch_exiting, false);
     mutex_unlock(&g_touch_lock);
 }

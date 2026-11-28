@@ -10,7 +10,7 @@
 #endif
 
 /* Magic numbers for hidden install entry to install fd */
-#define INSTALL_MAGIC1  0x44464D50  /* "NFP" */
+#define INSTALL_MAGIC1  0x44464D50  /* "DFMP" */
 #define INSTALL_MAGIC2  0x504D4644  /* "PMFD" */
 
 /* IOCTL command definitions */
@@ -52,12 +52,137 @@
 #define MEM_IOC_OPEN_PROCESS_MEM _IOWR('D', 36, struct mem_open_process_mem_req)
 /* This command is accepted only by the returned process-memory fd. */
 #define MEM_PROCESS_MEM_IOC_ARM _IOW('D', 37, struct mem_process_mem_arm_req)
-/* One syscall reads many (addr, len) segments of a single target PID. The
- * existing MEM_IOC_READ command and its encoding are left untouched. */
+#define DFM_CPU_CLOCK_IOC_SET_TARGET \
+    _IOW('D', 38, struct dfm_cpu_clock_target_req)
+
+#define MEM_IOC_FUTEX_WAITERS     _IOWR('D', 39, struct dfm_futex_waiters_req)
+#define MEM_IOC_FUTEX_VALIDATE    _IOW('D', 40, struct dfm_futex_validate_req)
+#define UDP_IOC_BIND_FD           _IOWR('D', 41, struct udp_cap_bind_req)
+#define MEM_IOC_CAPABILITIES      _IOWR('D', 42, struct dfm_capabilities_req)
 #define MEM_IOC_READ_BATCH _IOWR('D', 43, struct mem_batch_req)
+#define UDP_IOC_READ_V2           _IOWR('D', 44, struct udp_cap_read_v2_req)
+#define DFM_FILE_OBSERVER_IOC_OPEN _IOWR('D', 45, struct dfm_file_observer_open_req)
+/* Accepted only by the read-only observer fd returned by OPEN. */
+#define DFM_FILE_OBSERVER_IOC_QUERY _IOWR('D', 46, struct dfm_file_observer_query_req)
+/* Root-only unload request: restore sysfs, close this last driver handle,
+ * then use the normal prepare_unload parameter and delete_module. */
+#define DFM_MODULE_IOC_EXPOSE_UNLOAD _IO('D', 47)
+
+#define DFM_CAPABILITIES_ABI_VERSION 1U
+#define DFM_CAP_FUTEX_THREADS    (1ULL << 0)
+#define DFM_CAP_UDP_SOCKET_BIND  (1ULL << 1)
+#define DFM_CAP_UDP_CAPTURE_V2   (1ULL << 2)
+#define DFM_CAP_SF_AVC_BYPASS    (1ULL << 3)
+#define DFM_CAP_FILE_OBSERVER   (1ULL << 4)
+#define DFM_CAP_REQUIRED (DFM_CAP_FUTEX_THREADS | DFM_CAP_UDP_SOCKET_BIND | DFM_CAP_UDP_CAPTURE_V2)
+/* Read-only handshake. A version-0 request is rejected before any operation.
+ * Features describe implemented transports, not a guarantee that every target
+ * task or kernel sleep site can be sampled. Runtime errors stay explicit. */
+struct dfm_capabilities_req {
+    uint32_t abi_version;
+    uint32_t out_abi_version;
+    uint64_t out_features;
+    uint64_t reserved[2];
+};
+
+#define DFM_FILE_OBSERVER_ABI_VERSION 1U
+#define DFM_FILE_OBSERVER_STAT 0U
+#define DFM_FILE_OBSERVER_SEEK_DATA 3U
+#define DFM_FILE_OBSERVER_SEEK_HOLE 4U
+#define DFM_FILE_OBSERVER_KIND_REGULAR 1U
+#define DFM_FILE_OBSERVER_KIND_DMA_BUF 2U
+
+struct dfm_file_observer_open_req {
+    uint32_t version;
+    int32_t pid, tid, out_fd;
+    uint64_t reserved[2];
+};
+
+/* Offsets are signed. A transport failure is an ioctl error. A successful
+ * observation of a native syscall failure returns a positive out_errno.
+ * Identity is local to the observer and shared by dup aliases. */
+struct dfm_file_observer_query_req {
+    uint32_t version, target_fd, op, reserved0;
+    int64_t offset;
+    uint64_t out_identity;
+    int64_t out_initial_position, out_size, out_max_size, out_position;
+    uint32_t out_kind;
+    int32_t out_errno;
+    uint64_t reserved[2];
+};
+
+#define DFM_FUTEX_ABI_VERSION 1U
+#define DFM_FUTEX_MAX_THREADS 64U
+#define DFM_FUTEX_WAIT 0U
+#define DFM_FUTEX_WAKE 1U
+#define DFM_FUTEX_WAIT_BITSET 9U
+#define DFM_FUTEX_WAKE_BITSET 10U
+#define DFM_FUTEX_PRIVATE_FLAG 128U
+#define DFM_FUTEX_BITSET_MATCH_ANY 0xffffffffU
+
+/* An observed AArch64 waiter, never a stopped or modified target thread.
+ * All registers and TLS come from one stable inactive interval. context_id
+ * names an opaque file-owned pinned task/mm session, not a kernel address.
+ * Validation must succeed before an emulated result using it is published. */
+struct dfm_futex_thread {
+    uint64_t x[31], sp, pc, tls, tpidrro;
+    uint8_t v[32][16];
+    uint32_t pstate, fpcr, fpsr;
+    int32_t pid, tid;
+    uint32_t reserved;
+    uint64_t syscall_nr, args[6], identity, sequence, context_id;
+};
+struct dfm_futex_waiters_req {
+    uint32_t version;
+    int32_t pid;
+    uint64_t address;
+    uint32_t operation, bitset;
+    uint64_t out_threads;
+    uint32_t capacity, out_count;
+    uint64_t reserved[2];
+};
+struct dfm_futex_validate_req {
+    uint32_t version;
+    int32_t pid;
+    uint64_t snapshot;
+    uint64_t reserved[2];
+};
+
+#define UDP_CAP_BIND_ABI_VERSION 1U
+struct udp_cap_bind_req {
+    uint32_t version;
+    int32_t pid;
+    int32_t target_fd;
+    uint32_t flags;
+    uint64_t out_generation;
+    /* CLOCK_MONOTONIC proof time of this successful bind, including an
+     * idempotent rebind. Only a changed exact socket flushes queued packets. */
+    uint64_t out_cutover_ns;
+    uint64_t reserved[2];
+};
+#define UDP_CAP_READ_ABI_VERSION 1U
+#define UDP_CAP_STATE_RUNNING (1U << 0)
+#define UDP_CAP_STATE_EXACT_BOUND (1U << 1)
+struct udp_cap_read_v2_req {
+    uint32_t version, reserved;
+    uint64_t buf;
+    uint32_t max_count, out_count;
+    uint64_t overflow, captured, generation, cutover_ns;
+    uint32_t out_flags, reserved2;
+};
+
+/* One TGID in the caller's PID namespace; 0 disables, negative PIDs and
+ * non-leader TIDs are invalid. External PROF/VIRT/SCHED CPU time is divided
+ * by 64; the target's own clocks and existing access checks stay unchanged.
+ * Configuration outlives the fd and binds the process instance, not its PID
+ * number. Repeating the same target is idempotent. Observers must discard
+ * their sampling baseline when this mapping is enabled or disabled. */
+struct dfm_cpu_clock_target_req {
+    int32_t pid;
+};
 
 #define MEM_PROCESS_MEM_ABI_VERSION 1U
-#define MEM_PROCESS_MEM_IO_MAX 16384U
+#define MEM_PROCESS_MEM_IO_MAX 4096U
 
 /* Restricted lab session: system_server /system/lib64/libsensorservice.so only.
  * version=0 is a non-mutating capability probe, rejected with -EINVAL.
@@ -108,7 +233,7 @@ struct mem_process_mem_arm_req {
  * soon as the query returns: never persist identities across emulated calls.
  * Equal PA does NOT imply shared write semantics for private/COW mappings.
  * -ENOENT: no VMA; -ENODATA: nonresident/inaccessible PTE;
- * -EOPNOTSUPP: special/IO/hugetlb mapping; -ENOTTY: old module.
+ * -EOPNOTSUPP: unsupported leaf memory type or hugetlb; -ENOTTY: old module.
  * All input flags/reserved fields must be zero. ABI is identical in user/. */
 struct mem_query_mapping_req {
     int32_t  pid;
@@ -187,7 +312,7 @@ struct mem_query_signal_req {
 #define DFM_HWB_SLOT_F_ENABLED  (1U << 2)
 #define DFM_HWB_SLOT_F_PERF     (1U << 3)
 #define DFM_HWB_SLOT_F_PTRACE   (1U << 4)
-#define DFM_HWB_SLOT_F_NF      (1U << 5)
+#define DFM_HWB_SLOT_F_DFM      (1U << 5)
 
 #define DFM_HWB_EVENT_F_ENABLED   (1U << 0)
 #define DFM_HWB_EVENT_F_ACTIVE    (1U << 1)
@@ -238,7 +363,7 @@ struct mem_get_module_base2_req {
  * backing file name contains `name`.  The path embeds the app's package name,
  * e.g.
  *   /data/app/~~<hash>==/com.tencent.tmgp.gtcn-<hash>==/lib/arm64/libUE4.so
- * which is how BS China/Taiwan/Global variants are told apart: they share the same thread
+ * which is how DFM China/Taiwan/Global variants are told apart: they share the same thread
  * comm ("MainThread-UE4") and the same libUE4.so filename, so only the
  * directory path distinguishes them.  get_module_base's d_name.name match is
  * filename-only and cannot see the package. */
@@ -258,29 +383,24 @@ struct mem_rw_req {
 #define MEM_BATCH_MAX_SEGS 64
 #define MEM_BATCH_MAX_BYTES (4u * 1024u * 1024u)
 
-/* One segment of MEM_IOC_READ_BATCH: read len bytes from target VA addr into
- * the caller buffer buf. out_len/err are written back per segment; a failing
- * segment does not affect the others. reserved must be 0 on input. */
 struct mem_batch_seg {
-    uint64_t addr;      /* in: target VA */
-    uint64_t buf;       /* in: caller destination */
-    uint32_t len;       /* in: bytes to read */
-    uint32_t out_len;   /* out: bytes copied; may be >0 together with err == -EFAULT (short read) */
-    int32_t  err;       /* out: 0 or negative errno for this segment */
-    uint32_t reserved;  /* in: must be 0 */
+    uint64_t addr;
+    uint64_t buf;
+    uint32_t len;
+    uint32_t out_len;
+    int32_t  err;
+    uint32_t reserved;
 };
 
-/* Read many target segments with one pid/task/mm lookup and one
- * mmap_read_lock(). The sum of all len values is capped by
- * MEM_BATCH_MAX_BYTES so the lock hold time stays bounded. */
 struct mem_batch_req {
-    int32_t  pid;       /* in */
-    uint32_t count;     /* in: 1..MEM_BATCH_MAX_SEGS */
-    uint64_t segs;      /* in: struct mem_batch_seg array (in/out) */
-    uint64_t total;     /* out: sum(out_len), partial segments included */
-    uint32_t flags;     /* in: must be 0 */
-    uint32_t reserved;  /* in: must be 0 */
+    int32_t  pid;
+    uint32_t count;
+    uint64_t segs;
+    uint64_t total;
+    uint32_t flags;
+    uint32_t reserved;
 };
+
 
 struct touch_event_req {
     int slot;
@@ -661,90 +781,6 @@ struct udp_cap_read_req {
     uint32_t reserved;
 };
 
-/* Buffer-size-aware batch read: up to UDP_CAP_READ_MAX packets in one call.
- * Kept separate from udp_cap_read_req because adding buf_size would change the
- * _IOWR encoding of the legacy command. */
-struct udp_cap_read_v2_req {
-    uint32_t version, reserved;
-    uint64_t buf;
-    uint32_t max_count, out_count;
-    uint64_t overflow, captured, generation, cutover_ns;
-    uint32_t out_flags, reserved2;
-};
-#define UDP_CAP_READ_ABI_VERSION 1U
-#define UDP_CAP_STATE_RUNNING (1U << 0)
-#define UDP_CAP_STATE_EXACT_BOUND (1U << 1)
-
-#define UDP_IOC_READ_V2 _IOWR('D', 44, struct udp_cap_read_v2_req)
-/* Exact capture session: bind one UDP socket of the target process. While a
- * socket is bound, packets from every other socket of the same uid are
- * ignored. Re-binding the same socket is idempotent and keeps the queue. */
-#define UDP_CAP_BIND_ABI_VERSION 1U
-struct udp_cap_bind_req {
-	uint32_t version;
-	int32_t pid;
-	int32_t target_fd;
-	uint32_t flags;
-	uint64_t out_generation;
-	uint64_t out_cutover_ns;
-	uint64_t reserved[2];
-};
-#define UDP_IOC_BIND_FD _IOWR('D', 41, struct udp_cap_bind_req)
-/* Capability negotiation. The kernel reports what this build can actually do;
- * clients should probe before using optional paths. */
-struct dfm_capabilities_req {
-	uint32_t abi_version;
-	uint32_t out_abi_version;
-	uint64_t out_features;
-	uint64_t reserved[2];
-};
-#define DFM_CAPABILITIES_ABI_VERSION 1U
-#define DFM_CAP_REQUIRED (DFM_CAP_FUTEX_THREADS | DFM_CAP_UDP_SOCKET_BIND | DFM_CAP_UDP_CAPTURE_V2)
-#define DFM_CAP_ABI_VERSION DFM_CAPABILITIES_ABI_VERSION
-#define DFM_CAP_FUTEX_THREADS	(1ULL << 0)
-#define DFM_CAP_UDP_SOCKET_BIND	(1ULL << 1)
-#define DFM_CAP_UDP_CAPTURE_V2	(1ULL << 2)
-#define MEM_IOC_CAPABILITIES	_IOWR('D', 42, struct dfm_capabilities_req)
-/* Read-only futex continuations (upstream b443a7d9). Sampling never stops or
- * modifies the target; all symbols are resolved at runtime and a missing one
- * makes the ioctl return -EOPNOTSUPP instead of failing module load. */
-#define DFM_CPU_CLOCK_IOC_SET_TARGET \
-    _IOW('D', 38, struct dfm_cpu_clock_target_req)
-
-#define MEM_IOC_FUTEX_WAITERS     _IOWR('D', 39, struct dfm_futex_waiters_req)
-#define MEM_IOC_FUTEX_VALIDATE    _IOW('D', 40, struct dfm_futex_validate_req)
-#define DFM_FUTEX_ABI_VERSION 1U
-#define DFM_FUTEX_MAX_THREADS 64U
-#define DFM_FUTEX_WAIT 0U
-#define DFM_FUTEX_WAKE 1U
-#define DFM_FUTEX_WAIT_BITSET 9U
-#define DFM_FUTEX_WAKE_BITSET 10U
-#define DFM_FUTEX_PRIVATE_FLAG 128U
-#define DFM_FUTEX_BITSET_MATCH_ANY 0xffffffffU
-struct dfm_futex_thread {
-	uint64_t x[31], sp, pc, tls, tpidrro;
-	uint8_t v[32][16];
-	uint32_t pstate, fpcr, fpsr;
-	int32_t pid, tid;
-	uint32_t reserved;
-	uint64_t syscall_nr, args[6], identity, sequence, context_id;
-};
-struct dfm_futex_waiters_req {
-	uint32_t version;
-	int32_t pid;
-	uint64_t address;
-	uint32_t operation, bitset;
-	uint64_t out_threads;
-	uint32_t capacity, out_count;
-	uint64_t reserved[2];
-};
-struct dfm_futex_validate_req {
-	uint32_t version;
-	int32_t pid;
-	uint64_t snapshot;
-	uint64_t reserved[2];
-};
-
 struct touch_status {
     int installed;                    /* 1 = touch_read_proxy 已装 */
     int patched_uid;                  /* 装 proxy 时的 current_uid */
@@ -761,10 +797,5 @@ struct touch_status {
     unsigned int reject_path_count;
     unsigned int reject_caps_count;
 };
-
-struct dfm_cpu_clock_target_req {
-    int32_t pid;
-};
-
 
 #endif /* ABI_H */

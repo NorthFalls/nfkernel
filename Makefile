@@ -1,8 +1,9 @@
 MODULE_NAME = dfm
-$(MODULE_NAME)-objs := main.o mem.o process_mem.o touch.o touch_v2.o syscall.o kgsl.o dfm_hwb.o udp_capture.o file_io.o sf_groups.o futex.o compat.o
+$(MODULE_NAME)-objs := main.o mem.o process_mem.o touch.o touch_v2.o syscall.o kgsl.o dfm_hwb.o udp_capture.o file_io.o file_observer.o sf_groups.o sf_avc.o futex.o module_sysfs.o compat.o
 obj-m := $(MODULE_NAME).o
 
 ccflags-y += -Wno-unused-function -Wno-declaration-after-statement -Wno-gcc-compat
+CFLAGS_sf_avc.o += -I$(srctree)/security/selinux/include -I$(objtree)/security/selinux
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
