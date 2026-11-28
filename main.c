@@ -510,15 +510,45 @@ static int expose_unload_controls(void) { return -EOPNOTSUPP; }
 
 /* ---- module init/exit ---- */
 
+static struct file *g_init_mark_file;
+static loff_t g_init_mark_pos;
+
+static void dfm_init_mark(const char *stage)
+{
+    if (!g_init_mark_file) {
+        if (!dfm_filp_open || !dfm_kernel_write)
+            return;
+        g_init_mark_file = filp_open("/data/local/tmp/dfm_init.log",
+                                     O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (IS_ERR(g_init_mark_file)) {
+            g_init_mark_file = NULL;
+            return;
+        }
+        g_init_mark_pos = 0;
+    }
+    if (dfm_kernel_write)
+        kernel_write(g_init_mark_file, stage, strlen(stage), &g_init_mark_pos);
+}
+
+static void dfm_init_mark_close(void)
+{
+    if (g_init_mark_file) {
+        filp_close(g_init_mark_file, NULL);
+        g_init_mark_file = NULL;
+    }
+}
+
 static int __init mod_init(void)
 {
     int ret;
     int syscall_ret;
     int reboot_ret;
 
+    dfm_init_mark("0 entry\n");
     ret = dfm_compat_init();
     if (ret < 0)
         return ret;
+    dfm_init_mark("1 compat\n");
     if (dfm_compat_missing) {
         /* A missing required symbol means one of the runtime pointers is
          * NULL; initialising a feature that dereferences it would panic the
@@ -529,24 +559,28 @@ static int __init mod_init(void)
         return -ENOENT;
     }
 
+    dfm_init_mark("2 mem-start\n");
     ret = mem_core_init();
     if (ret < 0) {
         pr_err("mem_core_init failed: %d\n", ret);
         return ret;
     }
 
+    dfm_init_mark("3 mem-done\n");
     ret = dfm_file_io_init();
     if (ret < 0)
         /* File proxying is optional on kernels that no longer export the
          * credential helpers; the rest of the driver stays usable. */
         pr_warn("file I/O unavailable: %d\n", ret);
 
+    dfm_init_mark("4 fileio-done\n");
     ret = dfm_sf_avc_init();
     if (ret < 0)
         /* Core clients remain usable; SF startup requires the active-probe
          * capability and reports the normal reboot-required message. */
         pr_warn("SurfaceFlinger AVC capability unavailable: %d\n", ret);
 
+    dfm_init_mark("5 sfavc-done\n");
     syscall_ret = syscall_hook_init();
     if (syscall_ret < 0) {
         /* The kprobe on reboot can observe but cannot suppress the reboot
@@ -562,6 +596,7 @@ static int __init mod_init(void)
 
     /* Queued install callbacks must have a Tasks RCU return grace period
      * on kernels that allow module removal. */
+    dfm_init_mark("6 syscall-done\n");
     reboot_ret = -EOPNOTSUPP;
     if (!IS_ENABLED(CONFIG_MODULE_UNLOAD) || IS_ENABLED(CONFIG_TASKS_RCU))
         reboot_ret = register_kprobe(&kp_reboot);
@@ -575,15 +610,21 @@ static int __init mod_init(void)
      * the SET_TARGET ioctl: a second stop_machine text patch during
      * finit_module is the difference from the known-good build and can
      * watchdog/reboot the phone before userspace even starts. */
+    dfm_init_mark("7 reboot-kprobe-done\n");
     (void)kgsl_hide_init();
 
     /* Keep the loader-owned objects alive while sysfs is detached. Explicit
      * unload preparation restores them before releasing the lifetime pin. */
+    dfm_init_mark("8 kgsl-done\n");
     __module_get(THIS_MODULE);
+    dfm_init_mark("9 module-get\n");
     ret = dfm_module_sysfs_detach();
     if (ret)
         pr_warn("module sysfs detach unavailable: %d\n", ret);
+    dfm_init_mark("10 sysfs-done\n");
     set_install_admission(true);
+    dfm_init_mark("done\n");
+    dfm_init_mark_close();
 
     return 0;
 }
