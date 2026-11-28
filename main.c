@@ -519,6 +519,15 @@ static int __init mod_init(void)
     ret = dfm_compat_init();
     if (ret < 0)
         return ret;
+    if (dfm_compat_missing) {
+        /* A missing required symbol means one of the runtime pointers is
+         * NULL; initialising a feature that dereferences it would panic the
+         * kernel and reboot the phone during finit_module. Fail the load so
+         * the loader can report the error instead. */
+        pr_err("required compat symbols missing: %u; refusing load\n",
+               dfm_compat_missing);
+        return -ENOENT;
+    }
 
     ret = mem_core_init();
     if (ret < 0) {

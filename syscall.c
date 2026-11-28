@@ -55,7 +55,7 @@ static syscall_fn_t g_orig_syscall;
 static int g_hooked_nr = -1;
 static struct srcu_struct g_install_srcu;
 
-static void *syscall_lookup_symbol(const char *symbol_name)
+static void *__nocfi syscall_lookup_symbol(const char *symbol_name)
 {
     char cfi_name[KSYM_NAME_LEN];
     void *addr;
@@ -158,7 +158,7 @@ fail:
     return 0;
 }
 
-static int syscall_patch_text_nosync(void *dst, const void *src, size_t len)
+static int __nocfi syscall_patch_text_nosync(void *dst, const void *src, size_t len)
 {
     unsigned long phys;
     void *map;
