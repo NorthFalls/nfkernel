@@ -536,11 +536,10 @@ static int __init mod_init(void)
     }
 
     ret = dfm_file_io_init();
-    if (ret < 0) {
-        pr_err("dfm_file_io_init failed: %d\n", ret);
-        mem_core_exit();
-        return ret;
-    }
+    if (ret < 0)
+        /* File proxying is optional on kernels that no longer export the
+         * credential helpers; the rest of the driver stays usable. */
+        pr_warn("file I/O unavailable: %d\n", ret);
 
     ret = dfm_sf_avc_init();
     if (ret < 0)

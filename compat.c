@@ -83,8 +83,6 @@ struct dfm_compat_symbol {
 
 static const struct dfm_compat_symbol dfm_compat_symbols[] = {
 	{ "kallsyms_lookup_size_offset", (void **)&dfm_kallsyms_lookup_size_offset },
-	{ "override_creds", (void **)&dfm_override_creds },
-	{ "revert_creds", (void **)&dfm_revert_creds },
 	{ "kernel_read", (void **)&dfm_kernel_read },
 	{ "kernel_write", (void **)&dfm_kernel_write },
 	{ "task_work_add", (void **)&dfm_task_work_add },
@@ -165,6 +163,10 @@ int dfm_compat_init(void)
 	dfm_sock_from_file = (void *)dfm_kallsyms_lookup_name("sock_from_file");
 	/* Optional: absent on several vendor kernels; futex.c guards NULL. */
 	dfm_get_wchan = (void *)dfm_kallsyms_lookup_name("get_wchan");
+	/* Optional: 6.18 GKI no longer exports these; file I/O disables itself. */
+	dfm_override_creds =
+		(void *)dfm_kallsyms_lookup_name("override_creds");
+	dfm_revert_creds = (void *)dfm_kallsyms_lookup_name("revert_creds");
 	dfm_init_srcu_struct = (void *)dfm_kallsyms_lookup_name("init_srcu_struct");
 	dfm_cleanup_srcu_struct =
 		(void *)dfm_kallsyms_lookup_name("cleanup_srcu_struct");
