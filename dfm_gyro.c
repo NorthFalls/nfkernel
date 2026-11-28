@@ -104,6 +104,7 @@ static struct delayed_work dfm_gyro_direct_work;
 static atomic64_t dfm_gyro_direct_writes = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_direct_events = ATOMIC64_INIT(0);
 static unsigned int dfm_gyro_direct_fail_streak;
+static u64 dfm_gyro_direct_last_ts;
 
 static void dfm_gyro_direct_work_fn(struct work_struct *work);
 
@@ -262,6 +263,7 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 {
 	int n;
 	unsigned long off;
+	u64 newest = 0;
 
 	n = dfm_access_process_vm(task, start, buf, (int)len, 0);
 	if (n < (int)DFM_GYRO_EVENT_SIZE)
@@ -279,6 +281,13 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 			continue;
 		if (type != DFM_GYRO_TYPE_CAL && type != DFM_GYRO_TYPE_UNCAL)
 			continue;
+		/* The queue is a ring: old events stay in the buffer.  Only
+		 * rewrite events newer than the last one seen, otherwise we
+		 * burn power on stale records and never enter the idle cadence. */
+		if (timestamp <= READ_ONCE(dfm_gyro_direct_last_ts))
+			continue;
+		if (timestamp > newest)
+			newest = timestamp;
 
 		atomic64_inc(&dfm_gyro_direct_events);
 		(*events)++;
@@ -289,6 +298,8 @@ static int dfm_gyro_direct_scan_range(struct task_struct *task,
 					  FOLL_WRITE | FOLL_FORCE) == (int)sizeof(xy))
 			atomic64_inc(&dfm_gyro_direct_writes);
 	}
+	if (newest > READ_ONCE(dfm_gyro_direct_last_ts))
+		WRITE_ONCE(dfm_gyro_direct_last_ts, newest);
 	return 0;
 }
 
@@ -335,6 +346,7 @@ static void dfm_gyro_direct_stop(void)
 	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
 	dfm_gyro_direct_fail_streak = 0;
+	dfm_gyro_direct_last_ts = 0;
 }
 
 static int dfm_gyro_direct_start(pid_t tgid)
@@ -374,6 +386,7 @@ static int dfm_gyro_direct_start(pid_t tgid)
 	dfm_gyro_direct_len = len;
 	dfm_gyro_direct_buf = buf;
 	dfm_gyro_direct_fail_streak = 0;
+	dfm_gyro_direct_last_ts = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, true);
 	schedule_delayed_work(&dfm_gyro_direct_work,
 			      msecs_to_jiffies(DFM_GYRO_DIRECT_INTERVAL_MS));
@@ -664,6 +677,7 @@ int dfm_gyro_init(void)
 	dfm_gyro_direct_buf = NULL;
 	dfm_gyro_direct_base = 0;
 	dfm_gyro_direct_len = 0;
+	dfm_gyro_direct_last_ts = 0;
 	WRITE_ONCE(dfm_gyro_direct_active, false);
 	atomic64_set(&dfm_gyro_direct_events, 0);
 	atomic64_set(&dfm_gyro_direct_writes, 0);
