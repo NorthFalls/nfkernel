@@ -110,7 +110,6 @@ static const struct dfm_compat_symbol dfm_compat_symbols[] = {
 	{ "put_pid", (void **)&dfm_put_pid },
 	{ "find_vpid", (void **)&dfm_find_vpid },
 	{ "pid_task", (void **)&dfm_pid_task },
-	{ "get_wchan", (void **)&dfm_get_wchan },
 };
 
 unsigned int dfm_compat_missing;
@@ -164,6 +163,8 @@ int dfm_compat_init(void)
 		(void *)dfm_kallsyms_lookup_name("__flush_dcache_area");
 	dfm_fget_task = (void *)dfm_kallsyms_lookup_name("fget_task");
 	dfm_sock_from_file = (void *)dfm_kallsyms_lookup_name("sock_from_file");
+	/* Optional: absent on several vendor kernels; futex.c guards NULL. */
+	dfm_get_wchan = (void *)dfm_kallsyms_lookup_name("get_wchan");
 	dfm_init_srcu_struct = (void *)dfm_kallsyms_lookup_name("init_srcu_struct");
 	dfm_cleanup_srcu_struct =
 		(void *)dfm_kallsyms_lookup_name("cleanup_srcu_struct");
