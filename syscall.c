@@ -34,6 +34,7 @@
 #include <asm/unistd.h>
 #include <asm-generic/fixmap.h>
 
+#include "compat.h"
 #include "abi.h"
 #include "install.h"
 #include "syscall.h"

@@ -21,6 +21,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include "compat.h"
 #include "abi.h"
 #include "futex.h"
 #include "sf_avc.h"

@@ -18,6 +18,7 @@
 #include <linux/version.h>
 #include <linux/workqueue.h>
 
+#include "compat.h"
 #include "abi.h"
 #include "touch.h"
 

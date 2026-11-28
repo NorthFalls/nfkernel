@@ -50,6 +50,7 @@
 #include <asm/insn.h>
 #include <asm/ptrace.h>
 
+#include "compat.h"
 #include "abi.h"
 #include "dfm_hwb.h"
 
