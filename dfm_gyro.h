@@ -27,7 +27,8 @@ struct dfm_gyro_req {
 	__u32 processed;
 	__u32 rewritten;
 	__u32 reserved[3];
-	__u32 sample[3];	/* first 12 bytes of a candidate sensor buffer */
+	__u32 samples[8][3];	/* first 12 bytes, up to 8 candidate buffers */
+	__u32 sample_count;
 };
 
 #define DFM_GYRO_IOC_CTRL _IOWR(DFM_GYRO_IOC_TYPE, 48, struct dfm_gyro_req)

@@ -67,8 +67,8 @@ static u32 dfm_gyro_y_bits;
 static atomic64_t dfm_gyro_processed = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_rewritten = ATOMIC64_INIT(0);
 static atomic64_t dfm_gyro_entries = ATOMIC64_INIT(0);
-static u32 dfm_gyro_sample[3];
-static bool dfm_gyro_sample_valid;
+static u32 dfm_gyro_samples[8][3];
+static u32 dfm_gyro_sample_count;
 
 static struct kretprobe dfm_gyro_probes[3];
 
@@ -145,21 +145,27 @@ static void dfm_gyro_capture(struct iovec *iov, unsigned int n,
 			     unsigned long total)
 {
 	u32 s[3];
+	unsigned int slot;
 
-	if (READ_ONCE(dfm_gyro_sample_valid))
+	if (READ_ONCE(dfm_gyro_sample_count) >= ARRAY_SIZE(dfm_gyro_samples))
 		return;
-	/* Only sample buffers whose total length is an exact number of
-	 * ASensorEvent records; ordinary file/socket reads are ignored. */
+	/* Only sample buffers made of complete ASensorEvent records and
+	 * reasonably sized; ordinary file/network reads are ignored. */
 	if (total < DFM_GYRO_EVENT_SIZE || total % DFM_GYRO_EVENT_SIZE)
+		return;
+	if (total > DFM_GYRO_EVENT_SIZE * 64ul)
 		return;
 	if (dfm_gyro_read32(iov, n, 0, &s[0]) ||
 	    dfm_gyro_read32(iov, n, 4, &s[1]) ||
 	    dfm_gyro_read32(iov, n, 8, &s[2]))
 		return;
-	dfm_gyro_sample[0] = s[0];
-	dfm_gyro_sample[1] = s[1];
-	dfm_gyro_sample[2] = s[2];
-	WRITE_ONCE(dfm_gyro_sample_valid, true);
+	slot = READ_ONCE(dfm_gyro_sample_count);
+	if (slot >= ARRAY_SIZE(dfm_gyro_samples))
+		return;
+	dfm_gyro_samples[slot][0] = s[0];
+	dfm_gyro_samples[slot][1] = s[1];
+	dfm_gyro_samples[slot][2] = s[2];
+	WRITE_ONCE(dfm_gyro_sample_count, slot + 1);
 }
 
 static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
@@ -372,8 +378,8 @@ int dfm_gyro_init(void)
 	atomic64_set(&dfm_gyro_rewritten, 0);
 	atomic64_set(&dfm_gyro_entries, 0);
 	memset(dfm_gyro_probe_live, 0, sizeof(dfm_gyro_probe_live));
-	memset(dfm_gyro_sample, 0, sizeof(dfm_gyro_sample));
-	WRITE_ONCE(dfm_gyro_sample_valid, false);
+	memset(dfm_gyro_samples, 0, sizeof(dfm_gyro_samples));
+	WRITE_ONCE(dfm_gyro_sample_count, 0);
 	return 0;
 }
 
@@ -410,10 +416,8 @@ long dfm_gyro_ioctl(void __user *arg)
 		WRITE_ONCE(dfm_gyro_tgid, req.pid);
 		WRITE_ONCE(dfm_gyro_x_bits, req.x_bits);
 		WRITE_ONCE(dfm_gyro_y_bits, req.y_bits);
-		dfm_gyro_sample[0] = 0;
-		dfm_gyro_sample[1] = 0;
-		dfm_gyro_sample[2] = 0;
-		WRITE_ONCE(dfm_gyro_sample_valid, false);
+		WRITE_ONCE(dfm_gyro_sample_count, 0);
+		memset(dfm_gyro_samples, 0, sizeof(dfm_gyro_samples));
 		WRITE_ONCE(dfm_gyro_enabled, true);
 		ret = dfm_gyro_register_locked();
 		if (ret)
@@ -468,9 +472,8 @@ long dfm_gyro_ioctl(void __user *arg)
 	req.reserved[1] = (u32)atomic64_read(&dfm_gyro_entries);
 	req.reserved[2] = (dfm_copy_from_user_nofault ? 1u : 0u) |
 			  (dfm_copy_to_user_nofault ? 2u : 0u);
-	req.sample[0] = dfm_gyro_sample[0];
-	req.sample[1] = dfm_gyro_sample[1];
-	req.sample[2] = dfm_gyro_sample[2];
+	req.sample_count = READ_ONCE(dfm_gyro_sample_count);
+	memcpy(req.samples, dfm_gyro_samples, sizeof(req.samples));
 	mutex_unlock(&dfm_gyro_lock);
 
 	if (ret)
