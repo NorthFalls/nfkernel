@@ -18,8 +18,6 @@
 #if defined(CONFIG_SECURITY_SELINUX) && defined(CONFIG_KRETPROBES)
 /* Use the target kernel's declarations, including its gfp_t/CFI types. */
 #include "avc.h"
-#endif
-
 #include "compat.h"
 
 static const char sf_context[] = "u:r:surfaceflinger:s0";

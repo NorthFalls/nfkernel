@@ -105,6 +105,7 @@ extern unsigned int dfm_compat_missing;
 #define __set_fixmap (*dfm___set_fixmap)
 #define copy_to_kernel_nofault (*dfm_copy_to_kernel_nofault)
 #define dcache_clean_inval_poc (*dfm_dcache_clean_inval_poc)
+#define __flush_dcache_area (*dfm___flush_dcache_area)
 #define set_security_override_from_ctx (*dfm_set_security_override_from_ctx)
 #define get_task_exe_file (*dfm_get_task_exe_file)
 #define groups_alloc (*dfm_groups_alloc)

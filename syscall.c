@@ -90,7 +90,11 @@ static void *syscall_lookup_symbol(const char *symbol_name)
         dcache_clean_inval_poc(__start, __start + (sz));    \
     } while (0)
 #else
-#define syscall_flush_dcache(start, sz) __flush_dcache_area((void *)(start), (sz))
+#define syscall_flush_dcache(start, sz)                         \
+    do {                                                    \
+        if (dfm___flush_dcache_area)                       \
+            dfm___flush_dcache_area((void *)(start), (sz)); \
+    } while (0)
 #endif
 
 struct syscall_patch_text_info {
