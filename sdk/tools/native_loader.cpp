@@ -101,12 +101,13 @@ static_assert(kKmiTargetCount == 8, "exactly eight KMI targets are supported");
 /* ---- ANSI UI helpers (same layout as the old shell loader) ---- */
 
 static const char* const kReset = "\033[0m";
+static const char* const kDim = "\033[38;2;86;95;137m";
 static const char* const kCyan = "\033[38;2;125;207;255m";
 static const char* const kGreen = "\033[38;2;158;206;106m";
 static const char* const kYellow = "\033[38;2;224;175;104m";
-static const char* const kRed = "\033[38;2;224;108;117m";
+static const char* const kRed = "\033[38;2;247;118;142m";
 static const char* const kAccent = "\033[1;38;2;122;162;247m";
-static const char* const kTeal = "\033[38;2;138;180;248m";
+static const char* const kTeal = "\033[38;2;125;207;255m";
 static const char* const kWarnRed = "\033[38;2;224;108;117m";
 
 static bool g_quiet = false;
@@ -140,7 +141,9 @@ static void banner() {
     std::puts("    /    / _ \\/ __/ __/ _ \\/ _// _ `/ / / ");
     std::puts("   /_/|_/\\___/_/  \\__/_//_/_/  \\_,_/_/_/  ");
     std::printf("%s", kReset);
-    std::printf("\n%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
+    std::printf("\n%s──────────────────────────────────────────────%s\n\n",
+                kDim, kReset);
+    std::printf("%s<<<欢迎使用 NFKernel 驱动加载>>>%s\n\n", kYellow, kReset);
     std::printf("%s[!] 唯一官方 TG 地址如下，除以下地址外均为非官方：%s\n",
                 kYellow, kReset);
     std::printf("%s    %s%s\n", kTeal, kTgUrl, kReset);
@@ -1341,8 +1344,10 @@ static int run_menu(const std::string& /*release*/, int detected,
     SeriesGroup groups[16];
     const size_t group_count = build_groups(groups, 16);
     for (;;) {
-        std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n\n",
+        std::printf("\n%s请根据当前内核版本，从列表中选择最接近的驱动方案安装：%s\n",
                     kYellow, kReset);
+        std::printf("%s──────────────────────────────────────────────%s\n\n",
+                    kDim, kReset);
         show_menu(groups, group_count, detected);
         long choice = 0;
         if (!read_choice(&choice)) {
