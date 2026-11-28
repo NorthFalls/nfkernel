@@ -353,6 +353,7 @@ int syscall_hook_exit(void)
 
     g_hooked_nr = -1;
     g_orig_syscall = NULL;
+    return 0;
 }
 
 int syscall_hook_nr(void)
@@ -750,6 +751,7 @@ int syscall_cpu_clock_exit(void)
     }
     g_cpu_clock_get = NULL;
     mutex_unlock(&g_cpu_clock_mutex);
+    return 0;
 }
 
 #else
