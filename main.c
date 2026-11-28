@@ -540,8 +540,17 @@ static int __init mod_init(void)
         pr_warn("SurfaceFlinger AVC capability unavailable: %d\n", ret);
 
     syscall_ret = syscall_hook_init();
-    if (syscall_ret < 0)
-        pr_warn("syscall install hook unavailable: %d\n", syscall_ret);
+    if (syscall_ret < 0) {
+        /* The kprobe on reboot can observe but cannot suppress the reboot
+         * syscall enenkernel clients use as their final probe. Loading with
+         * only that fallback would appear successful and then reboot the
+         * phone, so fail closed instead. */
+        pr_err("syscall install hook unavailable: %d\n", syscall_ret);
+        dfm_sf_avc_exit();
+        dfm_file_io_exit();
+        mem_core_exit();
+        return syscall_ret;
+    }
 
     /* Queued install callbacks must have a Tasks RCU return grace period
      * on kernels that allow module removal. */
@@ -552,14 +561,6 @@ static int __init mod_init(void)
         pr_warn("failed to register kprobe on reboot: %d\n", reboot_ret);
     } else {
         g_reboot_kprobe_registered = 1;
-    }
-
-    if (syscall_ret < 0 && reboot_ret < 0) {
-        pr_err("no fd install entry registered\n");
-        dfm_sf_avc_exit();
-        dfm_file_io_exit();
-        mem_core_exit();
-        return reboot_ret;
     }
 
     ret = syscall_cpu_clock_init();

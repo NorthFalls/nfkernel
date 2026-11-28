@@ -87,7 +87,10 @@ static void *syscall_lookup_symbol(const char *symbol_name)
 #define syscall_flush_dcache(start, sz)                         \
     do {                                                    \
         unsigned long __start = (unsigned long)(start);     \
-        dcache_clean_inval_poc(__start, __start + (sz));    \
+        if (dfm_dcache_clean_inval_poc)                     \
+            dfm_dcache_clean_inval_poc(__start, __start + (sz)); \
+        else if (dfm___flush_dcache_area)                   \
+            dfm___flush_dcache_area((void *)(start), (sz)); \
     } while (0)
 #else
 #define syscall_flush_dcache(start, sz)                         \
@@ -273,6 +276,16 @@ int syscall_hook_init(void)
 
     if (g_hooked_nr >= 0)
         return 0;
+
+    /* Patching text with a NULL compat pointer would fault in kernel context
+     * and reboot the device. Refuse to install the hook unless the helpers
+     * needed by the patch path are present. */
+    if (!dfm___set_fixmap || !dfm_copy_to_kernel_nofault)
+        return -ENOENT;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+    if (!dfm_dcache_clean_inval_poc && !dfm___flush_dcache_area)
+        return -ENOENT;
+#endif
 
     g_sys_call_table = (syscall_fn_t *)syscall_lookup_symbol("sys_call_table");
     if (!g_sys_call_table)

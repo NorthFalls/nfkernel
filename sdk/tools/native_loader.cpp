@@ -70,6 +70,16 @@ static constexpr long kO_NONBLOCK = 0x800;
 static constexpr unsigned long kDfmInstallMagic1 = 0x44464D50UL;
 static constexpr unsigned long kDfmInstallMagic2 = 0x504D4644UL;
 static constexpr unsigned long kDfmModuleIocExposeUnload = _IO('D', 47);
+struct DfmBatchProbeReq {
+    int32_t pid;
+    uint32_t count;
+    uint64_t segs;
+    uint64_t total;
+    uint32_t flags;
+    uint32_t reserved;
+};
+static constexpr unsigned long kDfmMemIocReadBatch =
+    _IOWR('D', 43, DfmBatchProbeReq);
 static constexpr const char* kDfmPrepareUnloadPath =
     "/sys/module/dfm/parameters/prepare_unload";
 static constexpr const char* kVersion = DFM_EMBEDDED_MODULE_VERSION;
@@ -929,6 +939,34 @@ static int open_install_fd() {
     return -1;
 }
 
+enum LoadedDfmOwner {
+    kLoadedUnknown,
+    kLoadedNfk,
+    kLoadedForeign,
+};
+
+/* D43 is private to nfkernel: enenkernel leaves the command number unused, so
+ * the kernel returns ENOTTY there. Any other answer (including EINVAL from an
+ * empty batch) proves the command was recognised by our module. */
+static LoadedDfmOwner detect_loaded_dfm_owner() {
+    if (!is_module_loaded())
+        return kLoadedUnknown;
+    const int fd = open_install_fd();
+    if (fd < 0)
+        return kLoadedUnknown;
+    DfmBatchProbeReq req{};
+    req.pid = int32_t(getpid());
+    errno = 0;
+    const int result = ioctl(fd, kDfmMemIocReadBatch, &req);
+    const int saved = errno;
+    close(fd);
+    if (saved == ENOTTY)
+        return kLoadedForeign;
+    if (result == 0 || saved == EINVAL || saved == EFAULT)
+        return kLoadedNfk;
+    return kLoadedNfk;
+}
+
 static bool prepare_module_for_unload() {
     const int fd = open_install_fd();
     if (fd < 0)
@@ -1306,8 +1344,22 @@ static int load_kmi(const char* kmi, const std::string& params,
             return kExitFailure;
         }
     }
-    if (is_module_loaded() && !unload_loaded_module()) {
-        err("旧模块卸载失败，请重启设备后再加载");
+    if (is_module_loaded()) {
+        /* Never auto-unload here: on devices where enen's Magisk module or a
+         * previous boot already loaded a dfm, unloading it can tear down the
+         * running SurfaceFlinger payload and reboot the phone. */
+        const LoadedDfmOwner owner = detect_loaded_dfm_owner();
+        if (owner == kLoadedNfk) {
+            ok("内核模块已加载，无需重复刷入");
+            return kExitOk;
+        }
+        if (owner == kLoadedForeign) {
+            err("检测到非本驱动的 dfm 模块，已停止安装");
+            err("请先重启设备并移除对方的 dfm 模块，再刷入本驱动");
+            return kExitFailure;
+        }
+        err("检测到已加载的 dfm 模块，但无法确认来源");
+        err("为避免卸载正在运行的模块导致重启，请先重启设备再刷入");
         return kExitFailure;
     }
 
