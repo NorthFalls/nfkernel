@@ -116,8 +116,8 @@ static int dfm_gyro_read32(struct iovec *iov, unsigned int n,
 	return -EFAULT;
 }
 
-static int dfm_gyro_write32(struct iovec *iov, unsigned int n,
-			    unsigned long off, u32 val)
+static int dfm_gyro_write64(struct iovec *iov, unsigned int n,
+			    unsigned long off, u64 val)
 {
 	unsigned int i;
 	unsigned long base = 0;
@@ -127,33 +127,16 @@ static int dfm_gyro_write32(struct iovec *iov, unsigned int n,
 
 		if (len > ULONG_MAX - base)
 			return -EFAULT;
+		/* x/y must be one contiguous 8-byte field in a single segment;
+		 * otherwise a two-step write could leave x modified if y faults. */
 		if (len >= sizeof(val) && off >= base &&
 		    off - base <= len - sizeof(val))
 			return dfm_gyro_copy_to_user(
-				(u32 __user *)((char __user *)iov[i].iov_base +
+				(u64 __user *)((char __user *)iov[i].iov_base +
 					       (off - base)), &val, sizeof(val));
 		base += len;
 	}
 	return -EFAULT;
-}
-
-static bool dfm_gyro_has32(struct iovec *iov, unsigned int n,
-			   unsigned long off)
-{
-	unsigned int i;
-	unsigned long base = 0;
-
-	for (i = 0; i < n; i++) {
-		unsigned long len = iov[i].iov_len;
-
-		if (len > ULONG_MAX - base)
-			return false;
-		if (len >= sizeof(u32) && off >= base &&
-		    off - base <= len - sizeof(u32))
-			return true;
-		base += len;
-	}
-	return false;
 }
 
 static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
@@ -163,7 +146,7 @@ static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
 
 	for (off = 0; off + DFM_GYRO_EVENT_SIZE <= total;
 	     off += DFM_GYRO_EVENT_SIZE) {
-		u32 type = 0, x, y;
+		u32 type = 0;
 		bool found = false;
 
 		/* 只认 HAL ASensorEvent 的 type@+0x08。不要用 +0x04 的
@@ -175,23 +158,12 @@ static void dfm_gyro_rewrite(struct iovec *iov, unsigned int n,
 			found = true;
 		if (!found)
 			continue;
-		/* Both x and y must be fully inside single iovec segments before
-		 * any write, otherwise a failed second write could leave x modified. */
-		if (!dfm_gyro_has32(iov, n, off + DFM_GYRO_DATA_OFF) ||
-		    !dfm_gyro_has32(iov, n, off + DFM_GYRO_DATA_OFF + 4))
-			continue;
 
 		atomic64_inc(&dfm_gyro_processed);
-		if (dfm_gyro_read32(iov, n, off + DFM_GYRO_DATA_OFF, &x))
-			continue;
-		if (dfm_gyro_read32(iov, n, off + DFM_GYRO_DATA_OFF + 4, &y))
-			continue;
-
-		x = READ_ONCE(dfm_gyro_x_bits);
-		y = READ_ONCE(dfm_gyro_y_bits);
-		if (dfm_gyro_write32(iov, n, off + DFM_GYRO_DATA_OFF, x))
-			continue;
-		if (dfm_gyro_write32(iov, n, off + DFM_GYRO_DATA_OFF + 4, y))
+		/* Write x/y as one 64-bit pair so a fault cannot leave x half-updated. */
+		if (dfm_gyro_write64(iov, n, off + DFM_GYRO_DATA_OFF,
+				     ((u64)READ_ONCE(dfm_gyro_y_bits) << 32) |
+				     (u64)READ_ONCE(dfm_gyro_x_bits)))
 			continue;
 		{
 			u64 n = (u64)atomic64_inc_return(&dfm_gyro_rewritten);
@@ -235,8 +207,8 @@ static int dfm_gyro_entry(struct kretprobe_instance *ri, struct pt_regs *regs,
 		ctx->len = (unsigned long)ur->regs[2];
 		if (!ctx->buf || ctx->len < DFM_GYRO_EVENT_SIZE)
 			return 1;
-		if (ctx->len % DFM_GYRO_EVENT_SIZE)
-			return 1;
+		/* Do not require len to be an exact multiple: games may pass a
+		 * larger read buffer; rewrite only complete events. */
 		return 0;
 	}
 
